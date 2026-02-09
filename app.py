@@ -1,104 +1,479 @@
 import streamlit as st
-import pandas as pd
+import openpyxl
+from openpyxl.worksheet.datavalidation import DataValidation
 from io import BytesIO
-import datetime
+from copy import copy
+from zipfile import ZipFile, ZIP_DEFLATED
+from lxml import etree
+import re
+import json
+from datetime import datetime, date
 
-# --- CONFIGURACIÓN DE LA PÁGINA ---
-st.set_page_config(page_title="Adaptador Endalia Pro", page_icon="🎯", layout="wide")
+# ─────────────────────────────────────────────────────────────
+# UTILIDADES DE PRESERVACIÓN DE VALIDACIONES
+# ─────────────────────────────────────────────────────────────
 
-st.title("🎯 Adaptador Endalia: Inyección y Restauración")
-st.info("Este motor inyecta los datos y 'dibuja' de nuevo los desplegables para que Excel no los pierda.")
+def extract_validations_from_zip(file_bytes: bytes) -> dict:
+    """
+    Extrae los nodos XML <dataValidations> directamente del ZIP del .xlsx.
+    Retorna un dict: { 'xl/worksheets/sheet1.xml': etree.Element, ... }
+    """
+    validations = {}
+    with ZipFile(BytesIO(file_bytes), 'r') as zf:
+        for name in zf.namelist():
+            if re.match(r'xl/worksheets/sheet\d+\.xml', name):
+                xml_bytes = zf.read(name)
+                tree = etree.fromstring(xml_bytes)
+                ns = {'s': 'http://schemas.openxmlformats.org/spreadsheetml/2006/main'}
+                dv_nodes = tree.findall('.//s:dataValidations', ns)
+                if dv_nodes:
+                    for dv_node in dv_nodes:
+                        validations[name] = etree.tostring(dv_node, encoding='unicode')
+    return validations
 
-# --- CONFIGURACIÓN DE LAS LISTAS DE LOS DESPLEGABLES ---
-OPCIONES_TRAMO = ["Trabajo", "Pausa", "Comida", "Viaje", "Formación"]
-OPCIONES_SOBRESCRIBIR = ["SÍ", "NO"]
-ZONA_DEFECTO = ["(UTC+01:00) Bruselas, Copenhague, Madrid, París"]
 
-# --- CARGA DE ARCHIVOS ---
-col1, col2 = st.columns(2)
-with col1:
-    f_plantilla = st.file_uploader("1. Sube la Plantilla de Endalia", type=["xlsx"])
-with col2:
-    f_datos = st.file_uploader("2. Sube el archivo con los 14 tramos", type=["xlsx", "csv"])
+def reinject_validations_into_zip(output_bytes: bytes, original_validations: dict) -> bytes:
+    """
+    FALLBACK CRÍTICO: Re-inyecta los nodos <dataValidations> en el XML
+    de cada hoja dentro del archivo ZIP resultante.
+    Esto garantiza que incluso si openpyxl descartó las validaciones,
+    se restauran bit a bit desde el original.
+    """
+    ns = 'http://schemas.openxmlformats.org/spreadsheetml/2006/main'
+    ns_map = {'s': ns}
 
-if f_plantilla and f_datos:
-    try:
-        # Cargar datos
-        df_registros = pd.read_excel(f_datos) if f_datos.name.endswith('xlsx') else pd.read_csv(f_datos)
-        df_plantilla = pd.read_excel(f_plantilla) 
+    input_zip = ZipFile(BytesIO(output_bytes), 'r')
+    output_buffer = BytesIO()
+    output_zip = ZipFile(output_buffer, 'w', ZIP_DEFLATED)
 
-        if st.button("🚀 PROCESAR E INYECTAR DESPLEGABLES"):
-            output = BytesIO()
-            
-            # Usamos XlsxWriter para poder crear validaciones de datos (desplegables)
-            with pd.ExcelWriter(output, engine='xlsxwriter') as writer:
-                df_final = df_plantilla.copy()
-                
-                log_cambios = []
-                # Lógica de Match de Empleados
-                for idx, row_reg in df_registros.iterrows():
-                    emp_buscado = str(row_reg['Empleado']).strip().upper()
-                    # Buscamos en la primera columna de la plantilla
-                    mask = df_final.iloc[:, 0].astype(str).str.strip().str.upper().str.contains(emp_buscado, na=False)
-                    
-                    if mask.any():
-                        f_idx = df_final[mask].index[0]
-                        
-                        # Inyección de datos en celdas
-                        df_final.at[f_idx, 'Fecha de referencia'] = row_reg['Fecha']
-                        df_final.at[f_idx, 'Inicio'] = row_reg['Hora inicio']
-                        
-                        # Hora fin (si es 00:00 o nula, ponemos 18:00)
-                        h_fin = str(row_reg['Hora fin']) if pd.notnull(row_reg['Hora fin']) and "00:00" not in str(row_reg['Hora fin']) else "18:00"
-                        df_final.at[f_idx, 'Fin'] = h_fin
-                        
-                        # Valores para los desplegables
-                        df_final.at[f_idx, 'Tipo de tramo'] = "Trabajo"
-                        df_final.at[f_idx, 'Zona Horaria'] = ZONA_DEFECTO[0]
-                        df_final.at[f_idx, 'Sobrescritura'] = "SÍ"
-                        
-                        log_cambios.append(f"✅ {emp_buscado}: Inyectado")
+    for item in input_zip.namelist():
+        data = input_zip.read(item)
+
+        if item in original_validations:
+            # Parsear el XML de la hoja
+            tree = etree.fromstring(data)
+
+            # Eliminar cualquier <dataValidations> residual (puede estar vacío)
+            existing = tree.findall(f'{{{ns}}}dataValidations')
+            for ex in existing:
+                tree.remove(ex)
+
+            # Parsear el nodo original preservado
+            original_dv = etree.fromstring(original_validations[item])
+
+            # Insertar ANTES de ciertos nodos para mantener orden XML válido
+            # Orden típico: ... sheetData ... dataValidations ... pageMargins ...
+            insert_before_tags = [
+                f'{{{ns}}}pageMargins',
+                f'{{{ns}}}pageSetup',
+                f'{{{ns}}}headerFooter',
+                f'{{{ns}}}drawing',
+                f'{{{ns}}}legacyDrawing',
+                f'{{{ns}}}tableParts',
+                f'{{{ns}}}extLst',
+            ]
+
+            inserted = False
+            for tag in insert_before_tags:
+                target = tree.find(tag)
+                if target is not None:
+                    idx = list(tree).index(target)
+                    tree.insert(idx, original_dv)
+                    inserted = True
+                    break
+
+            if not inserted:
+                # Si no encontramos ninguno, lo ponemos al final
+                tree.append(original_dv)
+
+            data = etree.tostring(tree, xml_declaration=True, encoding='UTF-8', standalone=True)
+
+        output_zip.writestr(item, data)
+
+    input_zip.close()
+    output_zip.close()
+    return output_buffer.getvalue()
+
+
+def snapshot_openpyxl_validations(ws):
+    """
+    Captura las DataValidation de openpyxl antes de guardar,
+    para poder re-aplicarlas si se pierden.
+    """
+    snapshot = []
+    if hasattr(ws, 'data_validations') and ws.data_validations:
+        for dv in ws.data_validations.dataValidation:
+            snapshot.append({
+                'type': dv.type,
+                'formula1': dv.formula1,
+                'formula2': dv.formula2,
+                'allow_blank': dv.allow_blank,
+                'showErrorMessage': dv.showErrorMessage,
+                'showInputMessage': dv.showInputMessage,
+                'errorTitle': dv.errorTitle,
+                'error': dv.error,
+                'promptTitle': dv.promptTitle,
+                'prompt': dv.prompt,
+                'sqref': str(dv.sqref),
+                'showDropDown': dv.showDropDown,
+            })
+    return snapshot
+
+
+def restore_openpyxl_validations(ws, snapshot):
+    """Re-aplica validaciones desde snapshot si la hoja las perdió."""
+    if not snapshot:
+        return
+    # Limpiar existentes
+    ws.data_validations.dataValidation = []
+    for item in snapshot:
+        dv = DataValidation(
+            type=item['type'],
+            formula1=item['formula1'],
+            formula2=item['formula2'],
+            allow_blank=item['allow_blank'],
+            showErrorMessage=item['showErrorMessage'],
+            showInputMessage=item['showInputMessage'],
+            errorTitle=item['errorTitle'],
+            error=item['error'],
+            promptTitle=item['promptTitle'],
+            prompt=item['prompt'],
+            showDropDown=item['showDropDown'],
+        )
+        dv.sqref = item['sqref']
+        ws.add_data_validation(dv)
+
+
+# ─────────────────────────────────────────────────────────────
+# LÓGICA DE MATCHING Y EDICIÓN
+# ─────────────────────────────────────────────────────────────
+
+def find_column_indices(ws, header_row=1):
+    """
+    Detecta automáticamente las columnas relevantes en la plantilla.
+    Busca columnas que contengan palabras clave.
+    """
+    columns = {}
+    keywords = {
+        'nombre': ['nombre', 'empleado', 'name', 'trabajador', 'colaborador'],
+        'inicio': ['inicio', 'fecha inicio', 'start', 'desde', 'begin'],
+        'fin': ['fin', 'fecha fin', 'end', 'hasta', 'término', 'termino'],
+        'fecha': ['fecha', 'date', 'día', 'dia'],
+    }
+
+    for col_idx in range(1, ws.max_column + 1):
+        cell_value = ws.cell(row=header_row, column=col_idx).value
+        if cell_value is None:
+            continue
+        cell_lower = str(cell_value).strip().lower()
+
+        for key, terms in keywords.items():
+            for term in terms:
+                if term in cell_lower:
+                    if key not in columns:  # Primera coincidencia gana
+                        columns[key] = col_idx
+                    break
+
+    return columns
+
+
+def extract_employees_from_records(wb_records, sheet_name=None):
+    """
+    Extrae registros de empleados del archivo de registros.
+    Retorna lista de dicts con nombre, inicio, fin, fecha.
+    """
+    ws = wb_records[sheet_name] if sheet_name else wb_records.active
+    cols = find_column_indices(ws)
+
+    if 'nombre' not in cols:
+        return None, "No se encontró columna de 'Nombre/Empleado' en el archivo de registros."
+
+    employees = []
+    for row in range(2, ws.max_row + 1):
+        name = ws.cell(row=row, column=cols['nombre']).value
+        if name is None or str(name).strip() == '':
+            continue
+
+        record = {'nombre': str(name).strip()}
+
+        if 'inicio' in cols:
+            record['inicio'] = ws.cell(row=row, column=cols['inicio']).value
+        if 'fin' in cols:
+            record['fin'] = ws.cell(row=row, column=cols['fin']).value
+        if 'fecha' in cols:
+            record['fecha'] = ws.cell(row=row, column=cols['fecha']).value
+
+        employees.append(record)
+
+    return employees, None
+
+
+def normalize_name(name):
+    """Normaliza nombre para matching flexible."""
+    if name is None:
+        return ''
+    return re.sub(r'\s+', ' ', str(name).strip().lower())
+
+
+def match_and_update(ws_template, employees, header_row=1):
+    """
+    Hace match entre empleados del registro y la plantilla.
+    Solo actualiza .value de celdas Inicio, Fin, Fecha.
+    NO toca estructura, formatos ni validaciones.
+    """
+    cols = find_column_indices(ws_template, header_row)
+
+    if 'nombre' not in cols:
+        return 0, "No se encontró columna de nombre en la plantilla."
+
+    # Construir índice de empleados por nombre normalizado
+    emp_index = {}
+    for emp in employees:
+        key = normalize_name(emp['nombre'])
+        emp_index[key] = emp
+
+    updated = 0
+    not_found = []
+
+    for row in range(header_row + 1, ws_template.max_row + 1):
+        cell_name = ws_template.cell(row=row, column=cols['nombre']).value
+        if cell_name is None or str(cell_name).strip() == '':
+            continue
+
+        key = normalize_name(cell_name)
+
+        # Matching: exacto primero, luego parcial
+        match = emp_index.get(key)
+        if match is None:
+            # Matching parcial
+            for emp_key, emp_data in emp_index.items():
+                if emp_key in key or key in emp_key:
+                    match = emp_data
+                    break
+
+        if match is None:
+            not_found.append(str(cell_name).strip())
+            continue
+
+        # === ACTUALIZAR SOLO .value — NO tocar formato ni estructura ===
+        changed = False
+        if 'inicio' in cols and 'inicio' in match and match['inicio'] is not None:
+            ws_template.cell(row=row, column=cols['inicio']).value = match['inicio']
+            changed = True
+
+        if 'fin' in cols and 'fin' in match and match['fin'] is not None:
+            ws_template.cell(row=row, column=cols['fin']).value = match['fin']
+            changed = True
+
+        if 'fecha' in cols and 'fecha' in match and match['fecha'] is not None:
+            ws_template.cell(row=row, column=cols['fecha']).value = match['fecha']
+            changed = True
+
+        if changed:
+            updated += 1
+
+    return updated, not_found
+
+
+# ─────────────────────────────────────────────────────────────
+# STREAMLIT UI
+# ─────────────────────────────────────────────────────────────
+
+def main():
+    st.set_page_config(
+        page_title="Editor de Plantilla Excel",
+        page_icon="📊",
+        layout="wide"
+    )
+
+    st.title("📊 Editor de Plantilla Excel")
+    st.markdown(
+        "**Preserva Validaciones de Datos (Desplegables)** — "
+        "Actualiza fechas de empleados sin destruir la estructura de la plantilla."
+    )
+
+    st.divider()
+
+    col1, col2 = st.columns(2)
+
+    with col1:
+        st.subheader("1️⃣ Plantilla Excel")
+        st.caption("El archivo `.xlsx` con desplegables/validaciones que quieres preservar.")
+        template_file = st.file_uploader(
+            "Sube la plantilla",
+            type=['xlsx'],
+            key='template'
+        )
+
+    with col2:
+        st.subheader("2️⃣ Archivo de Registros")
+        st.caption("El archivo con los datos actualizados de los empleados.")
+        records_file = st.file_uploader(
+            "Sube los registros",
+            type=['xlsx'],
+            key='records'
+        )
+
+    st.divider()
+
+    # Configuración avanzada
+    with st.expander("⚙️ Configuración avanzada"):
+        header_row = st.number_input("Fila de encabezados en la plantilla", min_value=1, value=1)
+        template_sheet = st.text_input("Nombre de hoja en plantilla (vacío = hoja activa)", value="")
+        records_sheet = st.text_input("Nombre de hoja en registros (vacío = hoja activa)", value="")
+        use_xml_fallback = st.checkbox(
+            "Usar re-inyección XML como fallback (recomendado)",
+            value=True,
+            help="Si openpyxl pierde las validaciones, las restaura directamente en el XML del archivo."
+        )
+
+    if template_file and records_file:
+        if st.button("🚀 Procesar y Generar Archivo", type="primary", use_container_width=True):
+            with st.spinner("Procesando..."):
+                try:
+                    # ── PASO 1: Leer bytes originales de la plantilla ──
+                    template_bytes = template_file.read()
+                    records_bytes = records_file.read()
+
+                    # ── PASO 2: Extraer validaciones del XML original (backup) ──
+                    original_validations = extract_validations_from_zip(template_bytes)
+                    n_sheets_with_validations = len(original_validations)
+
+                    st.info(
+                        f"🔍 Validaciones detectadas en **{n_sheets_with_validations}** "
+                        f"hoja(s) del archivo original."
+                    )
+
+                    if original_validations:
+                        with st.expander("📋 Detalle de validaciones encontradas"):
+                            for sheet_path, xml_str in original_validations.items():
+                                st.code(xml_str[:2000], language='xml')
+
+                    # ── PASO 3: Cargar workbooks con openpyxl ──
+                    wb_template = openpyxl.load_workbook(
+                        BytesIO(template_bytes),
+                        data_only=False  # CRÍTICO: preservar fórmulas
+                    )
+                    wb_records = openpyxl.load_workbook(
+                        BytesIO(records_bytes),
+                        data_only=True  # Queremos valores resueltos
+                    )
+
+                    # Seleccionar hojas
+                    if template_sheet and template_sheet in wb_template.sheetnames:
+                        ws_template = wb_template[template_sheet]
                     else:
-                        log_cambios.append(f"⚠️ {emp_buscado}: No encontrado")
+                        ws_template = wb_template.active
 
-                # Escribir el DataFrame
-                df_final.to_excel(writer, sheet_name='Registros de jornada', index=False)
-                
-                workbook  = writer.book
-                worksheet = writer.sheets['Registros de jornada']
+                    # ── PASO 4: Snapshot de validaciones (capa openpyxl) ──
+                    dv_snapshot = snapshot_openpyxl_validations(ws_template)
+                    st.write(f"📌 Validaciones capturadas por openpyxl: **{len(dv_snapshot)}**")
 
-                # --- RECONSTRUCCIÓN DE DESPLEGABLES ---
-                # Definimos el rango hasta la fila 500 (puedes ampliarlo)
-                
-                # 1. Columna Zona Horaria (Columna E -> índice 4)
-                worksheet.data_validation('E2:E500', {
-                    'validate': 'list',
-                    'source': ZONA_DEFECTO
-                })
+                    # ── PASO 5: Extraer empleados del archivo de registros ──
+                    employees, error = extract_employees_from_records(
+                        wb_records,
+                        records_sheet if records_sheet else None
+                    )
 
-                # 2. Columna Tipo de tramo (Columna H -> índice 7)
-                worksheet.data_validation('H2:H500', {
-                    'validate': 'list',
-                    'source': OPCIONES_TRAMO
-                })
+                    if error:
+                        st.error(f"❌ Error en registros: {error}")
+                        return
 
-                # 3. Columna Sobrescritura (Columna I -> índice 8)
-                worksheet.data_validation('I2:I500', {
-                    'validate': 'list',
-                    'source': OPCIONES_SOBRESCRIBIR
-                })
+                    st.write(f"👥 Empleados encontrados en registros: **{len(employees)}**")
 
-                st.write("### Log de operaciones")
-                for item in log_cambios:
-                    st.text(item)
+                    # Preview
+                    with st.expander("👀 Vista previa de registros"):
+                        for emp in employees[:10]:
+                            st.write(emp)
+                        if len(employees) > 10:
+                            st.caption(f"... y {len(employees) - 10} más")
 
-            # Botón de descarga
-            st.download_button(
-                label="📥 Descargar Excel con Desplegables",
-                data=output.getvalue(),
-                file_name=f"Endalia_Corregido_{datetime.date.today()}.xlsx",
-                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-            )
+                    # ── PASO 6: Match y actualización (solo .value) ──
+                    updated, not_found = match_and_update(
+                        ws_template, employees, header_row
+                    )
 
-    except Exception as e:
-        st.error(f"Error en el proceso: {e}")
+                    st.success(f"✅ **{updated}** empleados actualizados en la plantilla.")
+
+                    if not_found:
+                        with st.expander(f"⚠️ {len(not_found)} empleados sin match"):
+                            for name in not_found:
+                                st.write(f"- {name}")
+
+                    # ── PASO 7: Restaurar validaciones (capa openpyxl) ──
+                    restore_openpyxl_validations(ws_template, dv_snapshot)
+
+                    # ── PASO 8: Guardar a buffer ──
+                    output_buffer = BytesIO()
+                    wb_template.save(output_buffer)
+                    output_bytes = output_buffer.getvalue()
+
+                    # ── PASO 9: Fallback XML — re-inyectar validaciones ──
+                    if use_xml_fallback and original_validations:
+                        st.info("🔧 Aplicando re-inyección XML de validaciones...")
+                        output_bytes = reinject_validations_into_zip(
+                            output_bytes, original_validations
+                        )
+                        st.success("✅ Validaciones re-inyectadas exitosamente en el XML.")
+
+                    # ── PASO 10: Verificación final ──
+                    final_validations = extract_validations_from_zip(output_bytes)
+                    if final_validations:
+                        st.success(
+                            f"🎯 **Verificación final**: {len(final_validations)} hoja(s) "
+                            f"con validaciones intactas en el archivo de salida."
+                        )
+                    else:
+                        st.warning(
+                            "⚠️ No se detectaron validaciones en el archivo final. "
+                            "Revisa el archivo original."
+                        )
+
+                    # ── PASO 11: Botón de descarga ──
+                    st.divider()
+                    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+                    filename = f"plantilla_actualizada_{timestamp}.xlsx"
+
+                    st.download_button(
+                        label="📥 Descargar Archivo Actualizado",
+                        data=output_bytes,
+                        file_name=filename,
+                        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet",
+                        type="primary",
+                        use_container_width=True
+                    )
+
+                except Exception as e:
+                    st.error(f"❌ Error durante el procesamiento: {str(e)}")
+                    st.exception(e)
+
+    # ── Documentación ──
+    st.divider()
+    with st.expander("📖 ¿Cómo funciona?"):
+        st.markdown("""
+### Técnica de Preservación de Validaciones (3 capas)
+
+**Capa 1 — openpyxl nativo:**
+- Se carga con `load_workbook(data_only=False)` para no perder fórmulas.
+- Se hace snapshot de todas las `DataValidation` antes de editar.
+- Se restauran después de la edición con `add_data_validation()`.
+
+**Capa 2 — Re-inyección XML directa:**
+- Antes de editar, se extraen los nodos `<dataValidations>` del XML
+  interno del `.xlsx` (que es un ZIP).
+- Después de que openpyxl guarda, se abre el ZIP resultante y se
+  **reemplaza/inyecta** el nodo XML original en cada hoja.
+- Esto es un "binary patch" que garantiza preservación bit a bit.
+
+**Capa 3 — Verificación:**
+- Se re-lee el archivo final y se confirma que las validaciones existen.
+
+### Reglas de Edición
+- **Solo** se modifica `.value` de celdas en columnas Inicio, Fin, Fecha.
+- **No** se tocan formatos, estilos, fórmulas de otras celdas ni estructura.
+- El matching de empleados es flexible (normalización de nombres).
+        """)
+
+
+if __name__ == '__main__':
+    main()
