@@ -19,9 +19,14 @@ ET.register_namespace('xr3', 'http://schemas.microsoft.com/office/spreadsheetml/
 ET.register_namespace('xr6', 'http://schemas.microsoft.com/office/spreadsheetml/2014/revision6')
 ET.register_namespace('xr10', 'http://schemas.microsoft.com/office/spreadsheetml/2018/revision10')
 
+ZONA_DEFAULT = "(UTC+01:00) Bruselas, Copenhague, Madrid, París"
+SOBRESCRITURA_DEFAULT = "Sí"
+TEMPLATE_SHEET = "Registros de jornada"
+HEADER_ROW = 1
+
 
 # ═══════════════════════════════════════════════════
-# XML / ZIP — Preservar validaciones
+# XML / ZIP — Preservar validaciones (no tocar)
 # ═══════════════════════════════════════════════════
 
 def extract_all_validations(file_bytes):
@@ -122,7 +127,7 @@ def patch_zip_with_validations(output_bytes, original_bytes):
 
 
 # ═══════════════════════════════════════════════════
-# Normalización
+# Utilidades (no tocar)
 # ═══════════════════════════════════════════════════
 
 def remove_accents(text):
@@ -138,10 +143,6 @@ def normalize_name(name):
     s = re.sub(r'\s+', ' ', s).strip()
     return s
 
-
-# ═══════════════════════════════════════════════════
-# Utilidades de fecha/hora
-# ═══════════════════════════════════════════════════
 
 def extract_time_part(val):
     if val is None:
@@ -199,52 +200,6 @@ def fmt_date(val):
     return str(val)
 
 
-# ═══════════════════════════════════════════════════
-# Lectura de Registros de Tramos
-# ═══════════════════════════════════════════════════
-
-def read_tramos(wb):
-    ws = wb.active
-    col_map = {}
-    keywords = {
-        'fecha': ['fecha'],
-        'hora_inicio': ['hora inicio'],
-        'hora_fin': ['hora fin'],
-        'duracion': ['duracion', 'duración'],
-        'tipo_tramo': ['tipo de tramo', 'tipo de tra', 'tipo tramo'],
-        'empleado': ['empleado'],
-        'validado': ['validado'],
-        'timezone_name': ['timezonename'],
-        'timezone_offset': ['timezoneoffset'],
-    }
-    for col in range(1, ws.max_column + 1):
-        val = ws.cell(row=1, column=col).value
-        if val is None:
-            continue
-        val_lower = str(val).strip().lower()
-        for key, terms in keywords.items():
-            for term in terms:
-                if term in val_lower and key not in col_map:
-                    col_map[key] = col
-                    break
-
-    if 'empleado' not in col_map:
-        return None, col_map, "No se encontro columna 'Empleado' en los registros."
-
-    tramos = []
-    for row in range(2, ws.max_row + 1):
-        emp = ws.cell(row=row, column=col_map['empleado']).value
-        if emp is None or str(emp).strip() == '':
-            continue
-        tramo = {'row': row, 'empleado': str(emp).strip()}
-        for key in ['fecha', 'hora_inicio', 'hora_fin', 'tipo_tramo', 'timezone_name']:
-            if key in col_map:
-                tramo[key] = ws.cell(row=row, column=col_map[key]).value
-        tramos.append(tramo)
-
-    return tramos, col_map, None
-
-
 def is_missing_hora_fin(hora_fin):
     if hora_fin is None:
         return True
@@ -256,14 +211,45 @@ def is_missing_hora_fin(hora_fin):
     return s == '' or s in ('00:00', '0:00', '00:00:00')
 
 
-# ═══════════════════════════════════════════════════
-# Detección de columnas plantilla
-# ═══════════════════════════════════════════════════
+def read_tramos(wb):
+    ws = wb.active
+    col_map = {}
+    keywords = {
+        'fecha': ['fecha'],
+        'hora_inicio': ['hora inicio'],
+        'hora_fin': ['hora fin'],
+        'tipo_tramo': ['tipo de tramo', 'tipo de tra', 'tipo tramo'],
+        'empleado': ['empleado'],
+    }
+    for col in range(1, ws.max_column + 1):
+        val = ws.cell(row=1, column=col).value
+        if val is None:
+            continue
+        val_lower = str(val).strip().lower()
+        for key, terms in keywords.items():
+            for term in terms:
+                if term in val_lower and key not in col_map:
+                    col_map[key] = col
+                    break
+    if 'empleado' not in col_map:
+        return None, "No se encontró la columna 'Empleado' en el archivo de registros."
+    tramos = []
+    for row in range(2, ws.max_row + 1):
+        emp = ws.cell(row=row, column=col_map['empleado']).value
+        if emp is None or str(emp).strip() == '':
+            continue
+        tramo = {'empleado': str(emp).strip()}
+        for key in ['fecha', 'hora_inicio', 'hora_fin', 'tipo_tramo']:
+            if key in col_map:
+                tramo[key] = ws.cell(row=row, column=col_map[key]).value
+        tramos.append(tramo)
+    return tramos, None
 
-def find_plantilla_columns(ws, header_row=1):
+
+def find_plantilla_columns(ws):
     cols = {}
     for col in range(1, ws.max_column + 1):
-        val = ws.cell(row=header_row, column=col).value
+        val = ws.cell(row=HEADER_ROW, column=col).value
         if val is None:
             continue
         h = str(val).strip().lower()
@@ -299,24 +285,22 @@ def copy_cell_style(src, tgt):
 
 
 # ═══════════════════════════════════════════════════
-# Motor de conciliación
+# Motor de conciliación (no tocar)
 # ═══════════════════════════════════════════════════
 
-def conciliar(wb_template, tramos, template_sheet_name, header_row, zona_default, sobrescritura_default):
-    if template_sheet_name and template_sheet_name in wb_template.sheetnames:
-        ws = wb_template[template_sheet_name]
+def conciliar(wb_template, tramos):
+    if TEMPLATE_SHEET in wb_template.sheetnames:
+        ws = wb_template[TEMPLATE_SHEET]
     else:
         ws = wb_template.active
 
-    cols = find_plantilla_columns(ws, header_row)
-    debug_info = {'cols': cols}
-
+    cols = find_plantilla_columns(ws)
     if 'empleado' not in cols:
-        return 0, 0, [], debug_info, "No se encontro columna 'Empleado' en la plantilla."
+        return None, None, None, "No se encontró la columna 'Empleado' en la plantilla."
 
-    # 1. Leer empleados de la plantilla
+    # Leer empleados plantilla
     plantilla_emps = []
-    for row in range(header_row + 1, ws.max_row + 1):
+    for row in range(HEADER_ROW + 1, ws.max_row + 1):
         emp_val = ws.cell(row=row, column=cols['empleado']).value
         if emp_val is None or str(emp_val).strip() == '':
             continue
@@ -327,15 +311,9 @@ def conciliar(wb_template, tramos, template_sheet_name, header_row, zona_default
             'codigo': ws.cell(row=row, column=cols.get('codigo', 2)).value,
         })
 
-    debug_info['plantilla_count'] = len(plantilla_emps)
-    debug_info['plantilla_names_sample'] = [p['nombre_norm'] for p in plantilla_emps[:5]]
+    plantilla_index = {pe['nombre_norm']: pe for pe in plantilla_emps}
 
-    # Índice por nombre normalizado
-    plantilla_index = {}
-    for pe in plantilla_emps:
-        plantilla_index[pe['nombre_norm']] = pe
-
-    # 2. Agrupar tramos por empleado
+    # Agrupar tramos
     tramos_by_emp = {}
     for t in tramos:
         key = normalize_name(t['empleado'])
@@ -343,74 +321,57 @@ def conciliar(wb_template, tramos, template_sheet_name, header_row, zona_default
             tramos_by_emp[key] = []
         tramos_by_emp[key].append(t)
 
-    debug_info['tramos_keys_sample'] = list(tramos_by_emp.keys())[:5]
-
-    # 3. Match y construir filas de salida
+    # Match
     output_rows = []
-    matched_emp_norms = set()
+    matched_norms = set()
     unmatched = []
 
-    for tramo_emp_norm, emp_tramos in tramos_by_emp.items():
-        found = plantilla_index.get(tramo_emp_norm)
+    for tramo_norm, emp_tramos in tramos_by_emp.items():
+        found = plantilla_index.get(tramo_norm)
         if found is None:
             for pe_norm, pe in plantilla_index.items():
-                if tramo_emp_norm in pe_norm or pe_norm in tramo_emp_norm:
+                if tramo_norm in pe_norm or pe_norm in tramo_norm:
                     found = pe
                     break
-
         if found is None:
             for t in emp_tramos:
                 unmatched.append(t['empleado'])
             continue
 
-        matched_emp_norms.add(found['nombre_norm'])
-
+        matched_norms.add(found['nombre_norm'])
         for t in emp_tramos:
             fecha_ref = t.get('fecha')
-            inicio_dt = combine_date_time(fecha_ref, t.get('hora_inicio'))
-            fin_dt = combine_date_time(fecha_ref, t.get('hora_fin'))
-
             output_rows.append({
                 'nif': found['nif'],
                 'codigo': found['codigo'],
                 'nombre': found['nombre'],
                 'fecha_ref': extract_date_part(fecha_ref),
-                'zona': zona_default,
-                'inicio': inicio_dt,
-                'fin': fin_dt,
+                'zona': ZONA_DEFAULT,
+                'inicio': combine_date_time(fecha_ref, t.get('hora_inicio')),
+                'fin': combine_date_time(fecha_ref, t.get('hora_fin')),
                 'tipo_tramo': t.get('tipo_tramo'),
-                'sobrescritura': sobrescritura_default,
+                'sobrescritura': SOBRESCRITURA_DEFAULT,
             })
 
-    debug_info['matched_employees'] = len(matched_emp_norms)
-    debug_info['output_rows'] = len(output_rows)
+    removed = sum(1 for pe in plantilla_emps if pe['nombre_norm'] not in matched_norms)
 
-    # 4. Contar eliminados
-    removed = 0
-    for pe in plantilla_emps:
-        if pe['nombre_norm'] not in matched_emp_norms:
-            removed += 1
-
-    # 5. Guardar estilos de fila modelo
-    style_row = header_row + 1
+    # Estilos
+    style_row = HEADER_ROW + 1
     styles = {}
     max_col = ws.max_column
     for c in range(1, max_col + 1):
         styles[c] = ws.cell(row=style_row, column=c)
 
-    # 6. Limpiar todas las filas de datos
-    old_max_row = ws.max_row
-    for row in range(header_row + 1, old_max_row + 1):
+    # Limpiar
+    for row in range(HEADER_ROW + 1, ws.max_row + 1):
         for c in range(1, max_col + 1):
             ws.cell(row=row, column=c).value = None
 
-    # 7. Escribir filas de salida
+    # Escribir
     for i, item in enumerate(output_rows):
-        row = header_row + 1 + i
-
+        row = HEADER_ROW + 1 + i
         for c in range(1, max_col + 1):
             copy_cell_style(styles[c], ws.cell(row=row, column=c))
-
         if 'nif' in cols:
             ws.cell(row=row, column=cols['nif']).value = item['nif']
         if 'codigo' in cols:
@@ -436,167 +397,176 @@ def conciliar(wb_template, tramos, template_sheet_name, header_row, zona_default
         if 'sobrescritura' in cols:
             ws.cell(row=row, column=cols['sobrescritura']).value = item['sobrescritura']
 
-    return len(output_rows), removed, list(set(unmatched)), debug_info, None
+    return output_rows, list(set(unmatched)), removed, None
 
 
 # ═══════════════════════════════════════════════════
-# STREAMLIT UI
+# INTERFAZ — limpia para cliente
 # ═══════════════════════════════════════════════════
 
 def main():
-    st.set_page_config(page_title="Conciliador Endalia", page_icon="📊", layout="wide")
-    st.title("📊 Conciliador de Tramos → Plantilla Endalia")
-    st.markdown("Importa tramos **sin hora fin** a la plantilla Endalia preservando desplegables y formato.")
-    st.divider()
+    st.set_page_config(page_title="Adaptador Endalia", page_icon="📋", layout="centered")
 
+    # Cabecera
+    st.markdown("""
+    <div style="text-align:center; padding: 1rem 0 0.5rem 0;">
+        <h1 style="margin-bottom:0.2rem;">📋 Adaptador Endalia</h1>
+        <p style="color:#888; font-size:1.05rem;">Completa los tramos sin hora de fin e importa a tu plantilla</p>
+    </div>
+    """, unsafe_allow_html=True)
+
+    st.markdown("---")
+
+    # ── Subida de archivos ──
     col1, col2 = st.columns(2)
     with col1:
-        st.subheader("1️⃣ Registros de Tramos")
-        st.caption("Excel con fichajes (Fecha, Hora inicio, Hora fin, Empleado...)")
-        tramos_file = st.file_uploader("Sube registros de tramos", type=['xlsx'], key='tramos')
+        tramos_file = st.file_uploader(
+            "📂 Registro de tramos",
+            type=['xlsx'],
+            key='tramos',
+            help="El archivo Excel exportado con los fichajes"
+        )
     with col2:
-        st.subheader("2️⃣ Plantilla Endalia")
-        st.caption("Plantilla .xlsx con desplegables a preservar.")
-        plantilla_file = st.file_uploader("Sube la plantilla", type=['xlsx'], key='plantilla')
-
-    st.divider()
-
-    with st.expander("⚙️ Configuracion"):
-        header_row = st.number_input("Fila de encabezados en la plantilla", min_value=1, value=1)
-        template_sheet = st.text_input("Hoja de la plantilla", value="Registros de jornada")
-        zona_default = st.selectbox("Zona horaria por defecto", [
-            "(UTC+01:00) Bruselas, Copenhague, Madrid, París",
-            "(UTC+00:00) Dublín, Edimburgo, Lisboa, Londres",
-            "(UTC+02:00) Atenas, Bucarest, Estambul",
-        ])
-        sobrescritura_default = st.selectbox("Sobrescritura por defecto", ["Sí", "No"])
+        plantilla_file = st.file_uploader(
+            "📂 Plantilla Endalia",
+            type=['xlsx'],
+            key='plantilla',
+            help="La plantilla .xlsx de Endalia con los empleados"
+        )
 
     if not tramos_file or not plantilla_file:
-        st.info("👆 Sube ambos archivos para continuar.")
+        st.markdown("""
+        <div style="text-align:center; padding:3rem 0; color:#aaa;">
+            <p style="font-size:1.1rem;">Sube ambos archivos para comenzar</p>
+        </div>
+        """, unsafe_allow_html=True)
         return
 
-    # ═══════════════════════════════════════
-    # PASO 1: Leer tramos
-    # ═══════════════════════════════════════
+    # ── Leer tramos ──
     tramos_bytes = tramos_file.read()
     wb_tramos = openpyxl.load_workbook(BytesIO(tramos_bytes), data_only=True)
-    tramos_all, tramos_cols, error = read_tramos(wb_tramos)
+    tramos_all, error = read_tramos(wb_tramos)
 
     if error:
-        st.error(f"❌ {error}")
+        st.error(error)
         return
 
-    # Filtrar: solo tramos SIN hora fin
     tramos_sin_fin = [t for t in tramos_all if is_missing_hora_fin(t.get('hora_fin'))]
-    tramos_con_fin = [t for t in tramos_all if not is_missing_hora_fin(t.get('hora_fin'))]
-
-    st.success(
-        f"✅ {len(tramos_all)} tramos leidos: "
-        f"**{len(tramos_con_fin)}** completos (se ignoran), "
-        f"**{len(tramos_sin_fin)}** sin hora fin (a importar)."
-    )
 
     if not tramos_sin_fin:
-        st.info("✅ Todos los tramos ya tienen Hora Fin. No hay nada que importar.")
+        st.success("Todos los tramos ya tienen hora de fin. No hay nada pendiente.")
         return
 
-    # ═══════════════════════════════════════
-    # PASO 2: Pedir hora fin por interfaz
-    # ═══════════════════════════════════════
-    st.subheader(f"🕐 Completa la Hora Fin de {len(tramos_sin_fin)} tramos:")
     st.markdown("---")
 
-    hora_fin_inputs = {}
+    # ── Sección: completar horas ──
+    st.markdown(f"### 🕐 {len(tramos_sin_fin)} tramos sin hora de fin")
+    st.caption("Completa la hora de fin de cada tramo de forma individual o aplica la misma hora a varios a la vez.")
+
+    # ── Aplicar hora masiva ──
+    with st.container():
+        st.markdown("**Aplicar hora a varios tramos:**")
+        mass_col1, mass_col2, mass_col3 = st.columns([2, 2, 2])
+        with mass_col1:
+            hora_masiva = st.time_input("Hora fin", value=time(17, 0), key="hora_masiva")
+        with mass_col2:
+            # Obtener empleados únicos
+            empleados_unicos = sorted(set(t['empleado'] for t in tramos_sin_fin))
+            seleccion = st.multiselect(
+                "Selecciona empleados",
+                options=["Todos"] + empleados_unicos,
+                default=[],
+                key="seleccion_masiva"
+            )
+        with mass_col3:
+            st.markdown("<br>", unsafe_allow_html=True)
+            aplicar_masivo = st.button("✅ Aplicar", key="btn_masivo", use_container_width=True)
+
+    # Determinar a quién aplicar
+    aplicar_a = set()
+    if aplicar_masivo and seleccion:
+        if "Todos" in seleccion:
+            aplicar_a = set(range(len(tramos_sin_fin)))
+        else:
+            for i, t in enumerate(tramos_sin_fin):
+                if t['empleado'] in seleccion:
+                    aplicar_a.add(i)
+
+    st.markdown("---")
+
+    # ── Tabla individual ──
+    hora_fin_values = {}
     for i, t in enumerate(tramos_sin_fin):
+        default_val = hora_masiva if i in aplicar_a else time(17, 0)
+
         c1, c2, c3, c4 = st.columns([3, 2, 2, 2])
         with c1:
-            st.write(f"**{t['empleado']}**")
+            st.markdown(f"**{t['empleado']}**")
         with c2:
-            st.write(f"📅 {fmt_date(t.get('fecha'))}")
+            st.text(f"📅 {fmt_date(t.get('fecha'))}")
         with c3:
-            st.write(f"🕐 Inicio: {fmt_time(t.get('hora_inicio'))}")
+            st.text(f"🕐 {fmt_time(t.get('hora_inicio'))}")
         with c4:
-            hora_fin_inputs[i] = st.time_input("Hora Fin", value=time(17, 0), key=f"hf_{i}")
+            hora_fin_values[i] = st.time_input(
+                "Fin",
+                value=default_val,
+                key=f"hf_{i}",
+                label_visibility="collapsed"
+            )
+
+    # Aplicar horas a los tramos
+    for i, t in enumerate(tramos_sin_fin):
+        t['hora_fin'] = hora_fin_values[i]
 
     st.markdown("---")
 
-    # Aplicar horas introducidas
-    for i, t in enumerate(tramos_sin_fin):
-        t['hora_fin'] = hora_fin_inputs[i]
-
-    # ═══════════════════════════════════════
-    # PASO 3: Preview
-    # ═══════════════════════════════════════
-    with st.expander(f"👀 Vista previa: {len(tramos_sin_fin)} tramos a importar"):
-        for t in tramos_sin_fin:
-            fecha = fmt_date(t.get('fecha'))
-            inicio = fmt_time(t.get('hora_inicio'))
-            fin = fmt_time(t.get('hora_fin'))
-            st.write(
-                f"**{t['empleado']}** | {fecha} | "
-                f"{inicio} → {fin} | {t.get('tipo_tramo', '-')}"
-            )
-
-    # ═══════════════════════════════════════
-    # PASO 4: Generar
-    # ═══════════════════════════════════════
-    if st.button("🚀 Generar Plantilla", type="primary", use_container_width=True):
-        with st.spinner("Procesando..."):
+    # ── Botón principal ──
+    if st.button("🚀 Generar plantilla", type="primary", use_container_width=True):
+        with st.spinner("Generando..."):
             try:
                 plantilla_bytes = plantilla_file.read()
-
-                original_validations = extract_all_validations(plantilla_bytes)
-                st.info(f"🔍 {len(original_validations)} hoja(s) con validaciones detectadas.")
-
                 wb_template = openpyxl.load_workbook(BytesIO(plantilla_bytes), data_only=False)
 
-                written, removed, unmatched, debug, err = conciliar(
-                    wb_template, tramos_sin_fin, template_sheet, header_row,
-                    zona_default, sobrescritura_default
-                )
+                output_rows, unmatched, removed, err = conciliar(wb_template, tramos_sin_fin)
 
                 if err:
-                    st.error(f"❌ {err}")
+                    st.error(err)
                     return
 
-                with st.expander("🐛 Info de depuracion"):
-                    st.json({
-                        'columnas_plantilla': {k: v for k, v in debug['cols'].items()},
-                        'empleados_en_plantilla': debug['plantilla_count'],
-                        'nombres_plantilla_sample': debug.get('plantilla_names_sample', []),
-                        'nombres_tramos_sample': debug.get('tramos_keys_sample', []),
-                        'empleados_matched': debug['matched_employees'],
-                        'filas_output': debug['output_rows'],
+                # Guardar + parche XML
+                buf = BytesIO()
+                wb_template.save(buf)
+                output_bytes = patch_zip_with_validations(buf.getvalue(), plantilla_bytes)
+
+                # ── Previsualización ──
+                st.markdown("---")
+                st.markdown(f"### ✅ {len(output_rows)} registros generados")
+
+                if unmatched:
+                    st.warning(f"{len(unmatched)} empleado(s) no encontrados en la plantilla: {', '.join(sorted(unmatched))}")
+
+                # Tabla de preview
+                preview_data = []
+                for r in output_rows:
+                    preview_data.append({
+                        'Empleado': r['nombre'],
+                        'Fecha': fmt_date(r['fecha_ref']),
+                        'Inicio': fmt_time(r['inicio']) if r['inicio'] else '',
+                        'Fin': fmt_time(r['fin']) if r['fin'] else '',
+                        'Tipo': r['tipo_tramo'],
                     })
 
-                st.success(f"✅ **{written}** filas escritas en la plantilla.")
-                if removed:
-                    st.info(f"🗑️ **{removed}** empleados sin tramos eliminados.")
-                if unmatched:
-                    with st.expander(f"⚠️ {len(unmatched)} empleados sin match"):
-                        for name in sorted(unmatched):
-                            st.write(f"- {name}")
+                st.dataframe(
+                    preview_data,
+                    use_container_width=True,
+                    hide_index=True,
+                )
 
-                # Guardar
-                output_buffer = BytesIO()
-                wb_template.save(output_buffer)
-                output_bytes = output_buffer.getvalue()
-
-                # Parche XML
-                st.info("🔧 Re-inyectando validaciones...")
-                output_bytes = patch_zip_with_validations(output_bytes, plantilla_bytes)
-
-                final_vals = extract_all_validations(output_bytes)
-                if final_vals:
-                    st.success(f"🎯 Verificacion OK: {len(final_vals)} hoja(s) con desplegables.")
-                else:
-                    st.warning("⚠️ No se detectaron validaciones en el archivo final.")
-
-                # Descarga
-                st.divider()
+                # ── Descarga ──
+                st.markdown("")
                 timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
                 st.download_button(
-                    label="📥 Descargar Plantilla Completada",
+                    label="📥 Descargar plantilla completada",
                     data=output_bytes,
                     file_name=f"endalia_{timestamp}.xlsx",
                     mime="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet",
@@ -605,8 +575,7 @@ def main():
                 )
 
             except Exception as e:
-                st.error(f"❌ Error: {str(e)}")
-                st.exception(e)
+                st.error(f"Ha ocurrido un error: {str(e)}")
 
 
 main()
