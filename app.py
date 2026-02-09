@@ -5,25 +5,36 @@ import pandas as pd
 from io import BytesIO
 import datetime
 
-# Configuración de la página
+# --- CONFIGURACIÓN DE LA PÁGINA ---
 st.set_page_config(page_title="Adaptador Endalia Pro", page_icon="📊", layout="wide")
 
-# Estilos personalizados para una interfaz más limpia
+# --- ESTILOS CSS CORREGIDOS (Se eliminó el error de escritura en unsafe_allow_html) ---
 st.markdown("""
     <style>
     .main { background-color: #f8fafc; }
-    .stButton>button { width: 100%; border-radius: 8px; height: 3em; font-weight: bold; background-color: #2563eb; color: white; }
-    .stButton>button:hover { background-color: #1d4ed8; border: none; }
+    .stButton>button { 
+        width: 100%; 
+        border-radius: 8px; 
+        height: 3em; 
+        font-weight: bold; 
+        background-color: #2563eb; 
+        color: white; 
+        border: none;
+    }
+    .stButton>button:hover { 
+        background-color: #1d4ed8; 
+    }
+    .stInfo { border-left: 5px solid #2563eb; }
     </style>
-    """, unsafe_allow_allow_html=True)
+    """, unsafe_allow_html=True)
 
 st.title("🚀 Adaptador de Tramos Endalia")
-st.info("Esta herramienta modifica la plantilla original de Endalia inyectando los datos sin alterar los menús desplegables ni el formato de las celdas.")
+st.info("Herramienta profesional para inyectar cierres de jornada manteniendo la integridad binaria de la plantilla original.")
 
-# --- SIDEBAR: CONFIGURACIÓN GLOBAL ---
+# --- BARRA LATERAL: CONFIGURACIÓN ---
 st.sidebar.header("⚙️ Configuración Global")
 bulk_end_time = st.sidebar.time_input("Hora de Cierre masivo", datetime.time(18, 0))
-global_timezone = st.sidebar.text_input("Zona Horaria (Exacta)", "(UTC+01:00) Bruselas, Copenhague, Madrid, París")
+global_timezone = st.sidebar.text_input("Zona Horaria Exacta", "(UTC+01:00) Bruselas, Copenhague, Madrid, París")
 global_overwrite = st.sidebar.selectbox("Sobrescritura por defecto", ["SÍ", "NO"], index=0)
 
 # --- CARGA DE ARCHIVOS ---
@@ -31,111 +42,108 @@ col1, col2 = st.columns(2)
 
 with col1:
     st.subheader("1. Plantilla de Endalia")
-    file_plantilla = st.file_uploader("Sube el Excel original de Endalia", type=["xlsx"], key="plantilla")
+    file_plantilla = st.file_uploader("Sube el Excel original descargado de Endalia", type=["xlsx"], key="plantilla")
 
 with col2:
     st.subheader("2. Registro de Tramos")
-    file_registros = st.file_uploader("Sube el archivo con los tramos (con columna 'Empleado')", type=["xlsx"], key="registros")
+    file_registros = st.file_uploader("Sube tu archivo de datos (Excel/CSV)", type=["xlsx", "csv"], key="registros")
 
 if file_plantilla and file_registros:
     try:
-        # Leer registros de tramos con Pandas
-        df_registros = pd.read_excel(file_registros)
+        # Lectura de los registros de entrada
+        if file_registros.name.endswith('.csv'):
+            df_registros = pd.read_csv(file_registros)
+        else:
+            df_registros = pd.read_excel(file_registros)
         
-        # Función para normalizar nombres y evitar errores por espacios o mayúsculas
         def normalize_name(name):
             return str(name).strip().upper() if pd.notnull(name) else ""
 
-        # Identificar tramos abiertos (aquellos que no tienen hora de fin o es 00:00)
+        # Detectar tramos que necesitan ser cerrados (sin hora de fin)
         tramos_abiertos = df_registros[
             (df_registros['Hora fin'].isna()) | 
             (df_registros['Hora fin'].astype(str).str.contains("00:00")) |
             (df_registros['Hora fin'].astype(str) == "")
         ].copy()
 
-        st.success(f"Se han detectado {len(tramos_abiertos)} tramos para cerrar.")
+        st.success(f"Se han detectado {len(tramos_abiertos)} tramos pendientes de cierre.")
 
-        if st.button("🔍 PREPARAR INYECCIÓN DE DATOS"):
-            # Cargar el libro de Excel con openpyxl (mantiene validaciones)
+        if st.button("🔍 INICIAR INYECCIÓN DE DATOS"):
+            # CARGA QUIRÚRGICA: Cargamos el archivo tal cual para no perder metadatos
             wb = load_workbook(file_plantilla, data_only=False)
             
             if "Registros de jornada" not in wb.sheetnames:
-                st.error("La hoja 'Registros de jornada' no existe en la plantilla.")
+                st.error("Error crítico: No se encontró la pestaña 'Registros de jornada' en la plantilla.")
             else:
                 ws = wb["Registros de jornada"]
-                
-                # Mapeo de cabeceras de la fila 1
+                # Leemos cabeceras para saber en qué columna está cada dato
                 headers = [str(cell.value) for cell in ws[1]]
                 
                 try:
-                    idx_emp = headers.index("Empleado")
-                    idx_fecha = headers.index("Fecha de referencia")
-                    idx_ini = headers.index("Inicio")
-                    idx_fin = headers.index("Fin")
-                    idx_tipo = headers.index("Tipo de tramo")
-                    idx_zona = headers.index("Zona Horaria")
-                    idx_sobre = headers.index("Sobrescritura")
+                    m = {
+                        "emp": headers.index("Empleado") + 1,
+                        "fec": headers.index("Fecha de referencia") + 1,
+                        "ini": headers.index("Inicio") + 1,
+                        "fin": headers.index("Fin") + 1,
+                        "tip": headers.index("Tipo de tramo") + 1,
+                        "zon": headers.index("Zona Horaria") + 1,
+                        "sob": headers.index("Sobrescritura") + 1
+                    }
                 except ValueError as e:
-                    st.error(f"Falta una columna obligatoria en la plantilla: {e}")
+                    st.error(f"La plantilla no tiene el formato esperado. Falta la columna: {e}")
                     st.stop()
 
-                cambios_realizados = []
+                cambios_log = []
                 no_encontrados = []
 
-                # Proceso de inyección
+                # Procesar cada tramo abierto
                 for _, reg in tramos_abiertos.iterrows():
-                    nombre_busqueda = normalize_name(reg['Empleado'])
-                    encontrado = False
+                    nombre_objetivo = normalize_name(reg['Empleado'])
+                    hallado = False
                     
-                    # Buscar al empleado en las filas de la plantilla
-                    for row_idx in range(2, ws.max_row + 1):
-                        cell_val = normalize_name(ws.cell(row=row_idx, column=idx_emp + 1).value)
+                    # Buscar en la plantilla original fila por fila
+                    for r in range(2, ws.max_row + 1):
+                        nombre_plantilla = normalize_name(ws.cell(row=r, column=m["emp"]).value)
                         
-                        if cell_val == nombre_busqueda:
+                        if nombre_plantilla == nombre_objetivo:
                             hora_fin_str = bulk_end_time.strftime("%H:%M")
                             
-                            # Inyectar valores directamente en las celdas
-                            ws.cell(row=row_idx, column=idx_fecha + 1).value = str(reg['Fecha'])
-                            ws.cell(row=row_idx, column=idx_ini + 1).value = str(reg['Hora inicio'])
-                            ws.cell(row=row_idx, column=idx_fin + 1).value = hora_fin_str
-                            ws.cell(row=row_idx, column=idx_tipo + 1).value = str(reg['Tipo de tramo'])
-                            ws.cell(row=row_idx, column=idx_zona + 1).value = global_timezone
-                            ws.cell(row=row_idx, column=idx_sobre + 1).value = global_overwrite
+                            # Modificamos SOLO el valor de las celdas
+                            ws.cell(row=r, column=m["fec"]).value = str(reg['Fecha'])
+                            ws.cell(row=r, column=m["ini"]).value = str(reg['Hora inicio'])
+                            ws.cell(row=r, column=m["fin"]).value = hora_fin_str
+                            ws.cell(row=r, column=m["tip"]).value = str(reg.get('Tipo de tramo', 'Trabajo'))
+                            ws.cell(row=r, column=m["zon"]).value = global_timezone
+                            ws.cell(row=r, column=m["sob"]).value = global_overwrite
                             
-                            cambios_realizados.append({
-                                "Empleado": reg['Empleado'],
-                                "Fila Excel": row_idx,
-                                "Nueva Hora Fin": hora_fin_str
-                            })
-                            encontrado = True
+                            cambios_log.append({"Empleado": reg['Empleado'], "Fila Excel": r, "Hora Cierre": hora_fin_str})
+                            hallado = True
                             break
                     
-                    if not encontrado:
+                    if not hallado:
                         no_encontrados.append(reg['Empleado'])
 
-                # Mostrar resultados
-                if cambios_realizados:
-                    st.subheader("✅ Resumen de la operación")
-                    st.dataframe(pd.DataFrame(cambios_realizados))
+                # Mostrar resumen y habilitar descarga
+                if cambios_log:
+                    st.subheader("✅ Inyección completada")
+                    st.dataframe(pd.DataFrame(cambios_log))
                     
-                    # Guardar el resultado en un objeto binario para descarga
                     output = BytesIO()
-                    wb.save(output)
+                    wb.save(output) 
                     
                     st.download_button(
-                        label="💾 DESCARGAR EXCEL MODIFICADO",
+                        label="💾 DESCARGAR PLANTILLA LISTA PARA ENDALIA",
                         data=output.getvalue(),
-                        file_name=f"Endalia_Cierre_{datetime.date.today()}.xlsx",
+                        file_name=f"Endalia_Cierre_Masivo_{datetime.date.today()}.xlsx",
                         mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
                     )
                 
                 if no_encontrados:
-                    with st.expander("⚠️ Empleados no encontrados"):
-                        st.write("Estos empleados estaban en tu registro pero no aparecen en la columna 'Empleado' de la plantilla:")
+                    with st.expander("⚠️ Empleados no localizados"):
                         for emp in list(set(no_encontrados)):
                             st.write(f"- {emp}")
 
     except Exception as e:
-        st.error(f"Se produjo un error durante el proceso: {e}")
+        st.error(f"Error técnico durante el procesado: {e}")
 else:
-    st.info("Sube ambos archivos para habilitar el botón de procesamiento.")
+    st.info("Por favor, sube ambos archivos para activar el motor de mapeo.")
