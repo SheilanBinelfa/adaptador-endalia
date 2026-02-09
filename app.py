@@ -26,7 +26,7 @@ HEADER_ROW = 1
 
 
 # ═══════════════════════════════════════════════════
-# XML / ZIP — Preservar validaciones (no tocar)
+# XML / ZIP — Preservar validaciones
 # ═══════════════════════════════════════════════════
 
 def extract_all_validations(file_bytes):
@@ -127,7 +127,7 @@ def patch_zip_with_validations(output_bytes, original_bytes):
 
 
 # ═══════════════════════════════════════════════════
-# Utilidades (no tocar)
+# Utilidades
 # ═══════════════════════════════════════════════════
 
 def remove_accents(text):
@@ -285,7 +285,7 @@ def copy_cell_style(src, tgt):
 
 
 # ═══════════════════════════════════════════════════
-# Motor de conciliación (no tocar)
+# Motor de conciliación
 # ═══════════════════════════════════════════════════
 
 def conciliar(wb_template, tramos):
@@ -298,7 +298,6 @@ def conciliar(wb_template, tramos):
     if 'empleado' not in cols:
         return None, None, None, "No se encontró la columna 'Empleado' en la plantilla."
 
-    # Leer empleados plantilla
     plantilla_emps = []
     for row in range(HEADER_ROW + 1, ws.max_row + 1):
         emp_val = ws.cell(row=row, column=cols['empleado']).value
@@ -313,7 +312,6 @@ def conciliar(wb_template, tramos):
 
     plantilla_index = {pe['nombre_norm']: pe for pe in plantilla_emps}
 
-    # Agrupar tramos
     tramos_by_emp = {}
     for t in tramos:
         key = normalize_name(t['empleado'])
@@ -321,7 +319,6 @@ def conciliar(wb_template, tramos):
             tramos_by_emp[key] = []
         tramos_by_emp[key].append(t)
 
-    # Match
     output_rows = []
     matched_norms = set()
     unmatched = []
@@ -355,19 +352,16 @@ def conciliar(wb_template, tramos):
 
     removed = sum(1 for pe in plantilla_emps if pe['nombre_norm'] not in matched_norms)
 
-    # Estilos
     style_row = HEADER_ROW + 1
     styles = {}
     max_col = ws.max_column
     for c in range(1, max_col + 1):
         styles[c] = ws.cell(row=style_row, column=c)
 
-    # Limpiar
     for row in range(HEADER_ROW + 1, ws.max_row + 1):
         for c in range(1, max_col + 1):
             ws.cell(row=row, column=c).value = None
 
-    # Escribir
     for i, item in enumerate(output_rows):
         row = HEADER_ROW + 1 + i
         for c in range(1, max_col + 1):
@@ -401,181 +395,187 @@ def conciliar(wb_template, tramos):
 
 
 # ═══════════════════════════════════════════════════
-# INTERFAZ — limpia para cliente
+# INTERFAZ
 # ═══════════════════════════════════════════════════
+
+def init_state():
+    if 'horas_fin' not in st.session_state:
+        st.session_state.horas_fin = {}
+    if 'resultado' not in st.session_state:
+        st.session_state.resultado = None
+
+
+def apply_mass_hora(indices, hora):
+    for i in indices:
+        st.session_state.horas_fin[i] = hora
+
 
 def main():
     st.set_page_config(page_title="Adaptador Endalia", page_icon="📋", layout="centered")
+    init_state()
 
-    # Cabecera
     st.markdown("""
-    <div style="text-align:center; padding: 1rem 0 0.5rem 0;">
+    <div style="text-align:center; padding: 1.5rem 0 0.5rem 0;">
         <h1 style="margin-bottom:0.2rem;">📋 Adaptador Endalia</h1>
-        <p style="color:#888; font-size:1.05rem;">Completa los tramos sin hora de fin e importa a tu plantilla</p>
+        <p style="color:#888;">Completa los tramos sin hora de fin y genera la plantilla de importación</p>
     </div>
     """, unsafe_allow_html=True)
 
     st.markdown("---")
 
-    # ── Subida de archivos ──
-    col1, col2 = st.columns(2)
-    with col1:
-        tramos_file = st.file_uploader(
-            "📂 Registro de tramos",
-            type=['xlsx'],
-            key='tramos',
-            help="El archivo Excel exportado con los fichajes"
-        )
-    with col2:
-        plantilla_file = st.file_uploader(
-            "📂 Plantilla Endalia",
-            type=['xlsx'],
-            key='plantilla',
-            help="La plantilla .xlsx de Endalia con los empleados"
-        )
+    # ── 1. Subida de archivos ──
+    c1, c2 = st.columns(2)
+    with c1:
+        tramos_file = st.file_uploader("📂 Registro de tramos", type=['xlsx'], key='tramos',
+                                        help="Excel exportado con los fichajes")
+    with c2:
+        plantilla_file = st.file_uploader("📂 Plantilla Endalia", type=['xlsx'], key='plantilla',
+                                           help="Plantilla .xlsx de Endalia con los empleados")
 
     if not tramos_file or not plantilla_file:
-        st.markdown("""
-        <div style="text-align:center; padding:3rem 0; color:#aaa;">
-            <p style="font-size:1.1rem;">Sube ambos archivos para comenzar</p>
-        </div>
-        """, unsafe_allow_html=True)
+        st.markdown("<div style='text-align:center;padding:3rem 0;color:#bbb;font-size:1.05rem;'>"
+                    "Sube ambos archivos para comenzar</div>", unsafe_allow_html=True)
         return
 
     # ── Leer tramos ──
     tramos_bytes = tramos_file.read()
     wb_tramos = openpyxl.load_workbook(BytesIO(tramos_bytes), data_only=True)
     tramos_all, error = read_tramos(wb_tramos)
-
     if error:
         st.error(error)
         return
 
     tramos_sin_fin = [t for t in tramos_all if is_missing_hora_fin(t.get('hora_fin'))]
-
     if not tramos_sin_fin:
-        st.success("Todos los tramos ya tienen hora de fin. No hay nada pendiente.")
+        st.success("✅ Todos los tramos ya tienen hora de fin. No hay nada pendiente.")
         return
 
+    # Inicializar horas en session_state
+    for i in range(len(tramos_sin_fin)):
+        if i not in st.session_state.horas_fin:
+            st.session_state.horas_fin[i] = time(17, 0)
+
+    # ── 2. Completar horas ──
     st.markdown("---")
+    st.markdown(f"### 🕐 {len(tramos_sin_fin)} tramos pendientes")
 
-    # ── Sección: completar horas ──
-    st.markdown(f"### 🕐 {len(tramos_sin_fin)} tramos sin hora de fin")
-    st.caption("Completa la hora de fin de cada tramo de forma individual o aplica la misma hora a varios a la vez.")
+    # Aplicar hora en bloque
+    st.markdown("##### Aplicar misma hora a varios tramos")
+    empleados_unicos = sorted(set(t['empleado'] for t in tramos_sin_fin))
 
-    # ── Aplicar hora masiva ──
-    with st.container():
-        st.markdown("**Aplicar hora a varios tramos:**")
-        mass_col1, mass_col2, mass_col3 = st.columns([2, 2, 2])
-        with mass_col1:
-            hora_masiva = st.time_input("Hora fin", value=time(17, 0), key="hora_masiva")
-        with mass_col2:
-            # Obtener empleados únicos
-            empleados_unicos = sorted(set(t['empleado'] for t in tramos_sin_fin))
-            seleccion = st.multiselect(
-                "Selecciona empleados",
-                options=["Todos"] + empleados_unicos,
-                default=[],
-                key="seleccion_masiva"
-            )
-        with mass_col3:
-            st.markdown("<br>", unsafe_allow_html=True)
-            aplicar_masivo = st.button("✅ Aplicar", key="btn_masivo", use_container_width=True)
+    m1, m2 = st.columns([3, 3])
+    with m1:
+        hora_masiva = st.time_input("Hora fin a aplicar", value=time(17, 0), key="masa_hora")
+    with m2:
+        seleccion = st.multiselect("Empleados", options=["— Todos —"] + empleados_unicos, key="masa_sel")
 
-    # Determinar a quién aplicar
-    aplicar_a = set()
-    if aplicar_masivo and seleccion:
-        if "Todos" in seleccion:
-            aplicar_a = set(range(len(tramos_sin_fin)))
+    if st.button("Aplicar hora", use_container_width=True):
+        if seleccion:
+            indices = []
+            if "— Todos —" in seleccion:
+                indices = list(range(len(tramos_sin_fin)))
+            else:
+                indices = [i for i, t in enumerate(tramos_sin_fin) if t['empleado'] in seleccion]
+            apply_mass_hora(indices, hora_masiva)
+            n = len(indices)
+            st.toast(f"Hora {hora_masiva.strftime('%H:%M')} aplicada a {n} tramo(s)")
         else:
-            for i, t in enumerate(tramos_sin_fin):
-                if t['empleado'] in seleccion:
-                    aplicar_a.add(i)
+            st.toast("Selecciona al menos un empleado", icon="⚠️")
 
-    st.markdown("---")
+    st.markdown("")
+    st.markdown("##### Detalle por tramo")
+    st.caption("Puedes ajustar la hora de cada tramo de forma individual.")
+    st.markdown("")
 
-    # ── Tabla individual ──
-    hora_fin_values = {}
+    # Cabecera de tabla
+    hdr1, hdr2, hdr3, hdr4 = st.columns([3, 2, 1.5, 2])
+    with hdr1:
+        st.markdown("**Empleado**")
+    with hdr2:
+        st.markdown("**Fecha**")
+    with hdr3:
+        st.markdown("**Inicio**")
+    with hdr4:
+        st.markdown("**Hora fin**")
+
+    # Filas
     for i, t in enumerate(tramos_sin_fin):
-        default_val = hora_masiva if i in aplicar_a else time(17, 0)
-
-        c1, c2, c3, c4 = st.columns([3, 2, 2, 2])
+        c1, c2, c3, c4 = st.columns([3, 2, 1.5, 2])
         with c1:
-            st.markdown(f"**{t['empleado']}**")
+            st.text(t['empleado'])
         with c2:
-            st.text(f"📅 {fmt_date(t.get('fecha'))}")
+            st.text(fmt_date(t.get('fecha')))
         with c3:
-            st.text(f"🕐 {fmt_time(t.get('hora_inicio'))}")
+            st.text(fmt_time(t.get('hora_inicio')))
         with c4:
-            hora_fin_values[i] = st.time_input(
-                "Fin",
-                value=default_val,
-                key=f"hf_{i}",
-                label_visibility="collapsed"
+            new_val = st.time_input(
+                "fin", value=st.session_state.horas_fin[i],
+                key=f"hf_{i}", label_visibility="collapsed"
             )
+            st.session_state.horas_fin[i] = new_val
 
-    # Aplicar horas a los tramos
-    for i, t in enumerate(tramos_sin_fin):
-        t['hora_fin'] = hora_fin_values[i]
-
+    # ── 3. Generar ──
     st.markdown("---")
 
-    # ── Botón principal ──
     if st.button("🚀 Generar plantilla", type="primary", use_container_width=True):
-        with st.spinner("Generando..."):
+        # Aplicar horas finales
+        for i, t in enumerate(tramos_sin_fin):
+            t['hora_fin'] = st.session_state.horas_fin[i]
+
+        with st.spinner("Generando plantilla..."):
             try:
                 plantilla_bytes = plantilla_file.read()
                 wb_template = openpyxl.load_workbook(BytesIO(plantilla_bytes), data_only=False)
-
                 output_rows, unmatched, removed, err = conciliar(wb_template, tramos_sin_fin)
 
                 if err:
                     st.error(err)
                     return
 
-                # Guardar + parche XML
                 buf = BytesIO()
                 wb_template.save(buf)
                 output_bytes = patch_zip_with_validations(buf.getvalue(), plantilla_bytes)
 
-                # ── Previsualización ──
-                st.markdown("---")
-                st.markdown(f"### ✅ {len(output_rows)} registros generados")
-
-                if unmatched:
-                    st.warning(f"{len(unmatched)} empleado(s) no encontrados en la plantilla: {', '.join(sorted(unmatched))}")
-
-                # Tabla de preview
-                preview_data = []
-                for r in output_rows:
-                    preview_data.append({
-                        'Empleado': r['nombre'],
-                        'Fecha': fmt_date(r['fecha_ref']),
-                        'Inicio': fmt_time(r['inicio']) if r['inicio'] else '',
-                        'Fin': fmt_time(r['fin']) if r['fin'] else '',
-                        'Tipo': r['tipo_tramo'],
-                    })
-
-                st.dataframe(
-                    preview_data,
-                    use_container_width=True,
-                    hide_index=True,
-                )
-
-                # ── Descarga ──
-                st.markdown("")
-                timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-                st.download_button(
-                    label="📥 Descargar plantilla completada",
-                    data=output_bytes,
-                    file_name=f"endalia_{timestamp}.xlsx",
-                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet",
-                    type="primary",
-                    use_container_width=True,
-                )
-
+                st.session_state.resultado = {
+                    'bytes': output_bytes,
+                    'rows': output_rows,
+                    'unmatched': unmatched,
+                }
             except Exception as e:
                 st.error(f"Ha ocurrido un error: {str(e)}")
+                return
+
+    # ── 4. Resultado ──
+    if st.session_state.resultado:
+        res = st.session_state.resultado
+        st.markdown("---")
+        st.markdown(f"### ✅ {len(res['rows'])} registros listos para importar")
+
+        if res['unmatched']:
+            st.warning(f"Empleados no encontrados en la plantilla: {', '.join(sorted(res['unmatched']))}")
+
+        preview = []
+        for r in res['rows']:
+            preview.append({
+                'Empleado': r['nombre'],
+                'Fecha': fmt_date(r['fecha_ref']),
+                'Inicio': fmt_time(r['inicio']) if r['inicio'] else '',
+                'Fin': fmt_time(r['fin']) if r['fin'] else '',
+                'Tipo de tramo': r['tipo_tramo'],
+            })
+
+        st.dataframe(preview, use_container_width=True, hide_index=True)
+
+        st.markdown("")
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        st.download_button(
+            label="📥 Descargar plantilla",
+            data=res['bytes'],
+            file_name=f"endalia_{timestamp}.xlsx",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet",
+            type="primary",
+            use_container_width=True,
+        )
 
 
 main()
