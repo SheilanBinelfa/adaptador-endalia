@@ -1,13 +1,12 @@
 import streamlit as st
 import openpyxl
-from openpyxl.utils import get_column_letter
 from io import BytesIO
 from zipfile import ZipFile, ZIP_DEFLATED
 import xml.etree.ElementTree as ET
 import re
 from datetime import datetime, time, date
-from collections import defaultdict
 from copy import copy
+import unicodedata
 
 SPREADSHEET_NS = 'http://schemas.openxmlformats.org/spreadsheetml/2006/main'
 ET.register_namespace('', SPREADSHEET_NS)
@@ -19,6 +18,7 @@ ET.register_namespace('xr2', 'http://schemas.microsoft.com/office/spreadsheetml/
 ET.register_namespace('xr3', 'http://schemas.microsoft.com/office/spreadsheetml/2016/revision3')
 ET.register_namespace('xr6', 'http://schemas.microsoft.com/office/spreadsheetml/2014/revision6')
 ET.register_namespace('xr10', 'http://schemas.microsoft.com/office/spreadsheetml/2018/revision10')
+
 
 # ─────────────────────────────────────────────────
 # XML / ZIP — Preservar validaciones
@@ -37,77 +37,7 @@ def extract_all_validations(file_bytes):
     return validations
 
 
-def patch_zip_with_validations(output_bytes, original_bytes):
-    ns = '{' + SPREADSHEET_NS + '}'
-    original_zip = ZipFile(BytesIO(original_bytes), 'r')
-    output_zip_in = ZipFile(BytesIO(output_bytes), 'r')
-    original_sheets = {}
-    for name in original_zip.namelist():
-        if name.startswith('xl/worksheets/') and name.endswith('.xml'):
-            original_sheets[name] = original_zip.read(name)
-    result_buffer = BytesIO()
-    result_zip = ZipFile(result_buffer, 'w', ZIP_DEFLATED)
-    processed = set()
-    for item in output_zip_in.namelist():
-        data = output_zip_in.read(item)
-        processed.add(item)
-        if item in original_sheets:
-            try:
-                output_tree = ET.fromstring(data)
-                original_tree = ET.fromstring(original_sheets[item])
-                # Quitar dataValidations del output
-                for dv in output_tree.findall(ns + 'dataValidations'):
-                    output_tree.remove(dv)
-                # Copiar del original
-                original_dv = original_tree.find(ns + 'dataValidations')
-                if original_dv is not None:
-                    # Actualizar sqref para cubrir nuevas filas
-                    output_tree_sd = output_tree.find(ns + 'sheetData')
-                    if output_tree_sd is not None:
-                        all_rows = output_tree_sd.findall(ns + 'row')
-                        if all_rows:
-                            max_row = max(int(r.get('r', '1')) for r in all_rows)
-                            # Expandir rangos de validacion
-                            for dv_item in original_dv.findall(ns + 'dataValidation'):
-                                sqref = dv_item.get('sqref', '')
-                                new_sqref = expand_sqref(sqref, max_row)
-                                dv_item.set('sqref', new_sqref)
-                    insert_before = [
-                        ns + 'pageMargins', ns + 'pageSetup', ns + 'headerFooter',
-                        ns + 'drawing', ns + 'legacyDrawing', ns + 'tableParts', ns + 'extLst',
-                    ]
-                    inserted = False
-                    for tag in insert_before:
-                        target = output_tree.find(tag)
-                        if target is not None:
-                            idx = list(output_tree).index(target)
-                            output_tree.insert(idx, original_dv)
-                            inserted = True
-                            break
-                    if not inserted:
-                        output_tree.append(original_dv)
-                # Preservar extLst
-                original_ext = original_tree.find(ns + 'extLst')
-                if original_ext is not None:
-                    for ext in output_tree.findall(ns + 'extLst'):
-                        output_tree.remove(ext)
-                    output_tree.append(original_ext)
-                data = b'<?xml version="1.0" encoding="UTF-8" standalone="yes"?>\n'
-                data += ET.tostring(output_tree, encoding='unicode').encode('utf-8')
-            except ET.ParseError:
-                pass
-        result_zip.writestr(item, data)
-    for item in original_zip.namelist():
-        if item not in processed:
-            result_zip.writestr(item, original_zip.read(item))
-    original_zip.close()
-    output_zip_in.close()
-    result_zip.close()
-    return result_buffer.getvalue()
-
-
 def expand_sqref(sqref, max_row):
-    """Expande rangos como D2:D500 a D2:D{max_row} si max_row es mayor."""
     parts = sqref.split(' ')
     new_parts = []
     for part in parts:
@@ -128,30 +58,108 @@ def expand_sqref(sqref, max_row):
     return ' '.join(new_parts)
 
 
+def patch_zip_with_validations(output_bytes, original_bytes):
+    ns = '{' + SPREADSHEET_NS + '}'
+    original_zip = ZipFile(BytesIO(original_bytes), 'r')
+    output_zip_in = ZipFile(BytesIO(output_bytes), 'r')
+    original_sheets = {}
+    for name in original_zip.namelist():
+        if name.startswith('xl/worksheets/') and name.endswith('.xml'):
+            original_sheets[name] = original_zip.read(name)
+    result_buffer = BytesIO()
+    result_zip = ZipFile(result_buffer, 'w', ZIP_DEFLATED)
+    processed = set()
+    for item in output_zip_in.namelist():
+        data = output_zip_in.read(item)
+        processed.add(item)
+        if item in original_sheets:
+            try:
+                output_tree = ET.fromstring(data)
+                original_tree = ET.fromstring(original_sheets[item])
+                for dv in output_tree.findall(ns + 'dataValidations'):
+                    output_tree.remove(dv)
+                original_dv = original_tree.find(ns + 'dataValidations')
+                if original_dv is not None:
+                    output_sd = output_tree.find(ns + 'sheetData')
+                    if output_sd is not None:
+                        all_rows = output_sd.findall(ns + 'row')
+                        if all_rows:
+                            max_row = max(int(r.get('r', '1')) for r in all_rows)
+                            for dv_item in original_dv.findall(ns + 'dataValidation'):
+                                sqref = dv_item.get('sqref', '')
+                                dv_item.set('sqref', expand_sqref(sqref, max_row))
+                    insert_before = [
+                        ns + 'pageMargins', ns + 'pageSetup', ns + 'headerFooter',
+                        ns + 'drawing', ns + 'legacyDrawing', ns + 'tableParts', ns + 'extLst',
+                    ]
+                    inserted = False
+                    for tag in insert_before:
+                        target = output_tree.find(tag)
+                        if target is not None:
+                            idx = list(output_tree).index(target)
+                            output_tree.insert(idx, original_dv)
+                            inserted = True
+                            break
+                    if not inserted:
+                        output_tree.append(original_dv)
+                original_ext = original_tree.find(ns + 'extLst')
+                if original_ext is not None:
+                    for ext in output_tree.findall(ns + 'extLst'):
+                        output_tree.remove(ext)
+                    output_tree.append(original_ext)
+                data = b'<?xml version="1.0" encoding="UTF-8" standalone="yes"?>\n'
+                data += ET.tostring(output_tree, encoding='unicode').encode('utf-8')
+            except ET.ParseError:
+                pass
+        result_zip.writestr(item, data)
+    for item in original_zip.namelist():
+        if item not in processed:
+            result_zip.writestr(item, original_zip.read(item))
+    original_zip.close()
+    output_zip_in.close()
+    result_zip.close()
+    return result_buffer.getvalue()
+
+
 # ─────────────────────────────────────────────────
-# Lectura del archivo de Registros de Tramos
+# Normalización de nombres
 # ─────────────────────────────────────────────────
 
-def normalize(val):
-    if val is None:
+def remove_accents(text):
+    """Quita acentos: é->e, ñ->n, etc."""
+    nfkd = unicodedata.normalize('NFKD', text)
+    return ''.join(c for c in nfkd if not unicodedata.category(c).startswith('M'))
+
+
+def normalize_name(name):
+    """Normaliza nombre para matching robusto."""
+    if name is None:
         return ''
-    return re.sub(r'\s+', ' ', str(val).strip().lower())
+    s = str(name).strip()
+    s = s.lower()
+    s = remove_accents(s)
+    s = re.sub(r'\s+', ' ', s)
+    s = s.strip()
+    return s
 
+
+# ─────────────────────────────────────────────────
+# Lectura de Registros de Tramos
+# ─────────────────────────────────────────────────
 
 def read_tramos(wb):
     ws = wb.active
-    # Detectar columnas
     col_map = {}
     keywords = {
         'fecha': ['fecha'],
-        'hora_inicio': ['hora inicio', 'inicio'],
-        'hora_fin': ['hora fin', 'fin'],
+        'hora_inicio': ['hora inicio'],
+        'hora_fin': ['hora fin'],
         'duracion': ['duracion', 'duración'],
-        'tipo_tramo': ['tipo de tramo', 'tipo tramo', 'tipo de tra'],
+        'tipo_tramo': ['tipo de tramo', 'tipo de tra', 'tipo tramo'],
         'empleado': ['empleado'],
         'validado': ['validado'],
-        'timezone_name': ['timezonename', 'timezone'],
-        'timezone_offset': ['timezoneoffset', 'offset'],
+        'timezone_name': ['timezonename'],
+        'timezone_offset': ['timezoneoffset'],
     }
     for col in range(1, ws.max_column + 1):
         val = ws.cell(row=1, column=col).value
@@ -172,28 +180,16 @@ def read_tramos(wb):
         emp = ws.cell(row=row, column=col_map['empleado']).value
         if emp is None or str(emp).strip() == '':
             continue
-        tramo = {
-            'row': row,
-            'empleado': str(emp).strip(),
-        }
-        if 'fecha' in col_map:
-            tramo['fecha'] = ws.cell(row=row, column=col_map['fecha']).value
-        if 'hora_inicio' in col_map:
-            tramo['hora_inicio'] = ws.cell(row=row, column=col_map['hora_inicio']).value
-        if 'hora_fin' in col_map:
-            tramo['hora_fin'] = ws.cell(row=row, column=col_map['hora_fin']).value
-        if 'tipo_tramo' in col_map:
-            tramo['tipo_tramo'] = ws.cell(row=row, column=col_map['tipo_tramo']).value
-        if 'timezone_name' in col_map:
-            tramo['timezone'] = ws.cell(row=row, column=col_map['timezone_name']).value
-
+        tramo = {'row': row, 'empleado': str(emp).strip()}
+        for key in ['fecha', 'hora_inicio', 'hora_fin', 'tipo_tramo', 'timezone_name']:
+            if key in col_map:
+                tramo[key] = ws.cell(row=row, column=col_map[key]).value
         tramos.append(tramo)
 
     return tramos, col_map, None
 
 
 def is_missing_hora_fin(hora_fin):
-    """Retorna True si hora_fin esta vacia o es 00:00."""
     if hora_fin is None:
         return True
     if isinstance(hora_fin, time):
@@ -201,11 +197,10 @@ def is_missing_hora_fin(hora_fin):
     if isinstance(hora_fin, datetime):
         return hora_fin.hour == 0 and hora_fin.minute == 0
     s = str(hora_fin).strip()
-    return s == '' or s == '00:00' or s == '0:00' or s == '00:00:00'
+    return s == '' or s in ('00:00', '0:00', '00:00:00')
 
 
-def format_time_for_display(val):
-    """Formatea un valor de tiempo para mostrar en la interfaz."""
+def fmt_time(val):
     if val is None:
         return ''
     if isinstance(val, time):
@@ -215,7 +210,7 @@ def format_time_for_display(val):
     return str(val)
 
 
-def format_date_for_display(val):
+def fmt_date(val):
     if val is None:
         return ''
     if isinstance(val, (datetime, date)):
@@ -224,16 +219,16 @@ def format_date_for_display(val):
 
 
 # ─────────────────────────────────────────────────
-# Escritura en la Plantilla Endalia
+# Detección de columnas de la plantilla
 # ─────────────────────────────────────────────────
 
 def find_plantilla_columns(ws, header_row=1):
     cols = {}
     keywords = {
         'nif': ['doc. identificador', 'nif', 'dni', 'identificador'],
-        'codigo': ['codigo empleado', 'código empleado', 'codigo', 'código'],
+        'codigo': ['codigo empleado', 'código empleado'],
         'empleado': ['empleado'],
-        'fecha_ref': ['fecha de referencia', 'fecha ref'],
+        'fecha_ref': ['fecha de referencia'],
         'zona': ['zona horaria'],
         'inicio': ['inicio'],
         'fin': ['fin'],
@@ -253,141 +248,150 @@ def find_plantilla_columns(ws, header_row=1):
     return cols
 
 
-def copy_cell_style(source_cell, target_cell):
-    """Copia formato de una celda a otra."""
-    if source_cell.has_style:
-        target_cell.font = copy(source_cell.font)
-        target_cell.border = copy(source_cell.border)
-        target_cell.fill = copy(source_cell.fill)
-        target_cell.number_format = source_cell.number_format
-        target_cell.protection = copy(source_cell.protection)
-        target_cell.alignment = copy(source_cell.alignment)
+def copy_cell_style(src, tgt):
+    if src.has_style:
+        tgt.font = copy(src.font)
+        tgt.border = copy(src.border)
+        tgt.fill = copy(src.fill)
+        tgt.number_format = src.number_format
+        tgt.protection = copy(src.protection)
+        tgt.alignment = copy(src.alignment)
 
 
-def build_and_write_plantilla(wb_template, tramos_to_inject, template_sheet_name, header_row=1):
-    """
-    Reconstruye la hoja de la plantilla:
-    - Empleados con match: tantas filas como tramos tengan
-    - Empleados sin match: se eliminan
-    """
+# ─────────────────────────────────────────────────
+# Motor de conciliación
+# ─────────────────────────────────────────────────
+
+def conciliar(wb_template, tramos, template_sheet_name, header_row, zona_default, sobrescritura_default):
     if template_sheet_name and template_sheet_name in wb_template.sheetnames:
         ws = wb_template[template_sheet_name]
     else:
         ws = wb_template.active
 
     cols = find_plantilla_columns(ws, header_row)
+    debug_info = {'cols': cols}
 
     if 'empleado' not in cols:
-        return 0, 0, "No se encontro columna 'Empleado' en la plantilla."
+        return 0, 0, [], debug_info, "No se encontro columna 'Empleado' en la plantilla."
 
-    # Leer empleados de la plantilla
-    plantilla_employees = []
+    # 1. Leer empleados de la plantilla
+    plantilla_emps = []
     for row in range(header_row + 1, ws.max_row + 1):
-        emp_name = ws.cell(row=row, column=cols['empleado']).value
-        if emp_name is None or str(emp_name).strip() == '':
+        emp_val = ws.cell(row=row, column=cols['empleado']).value
+        if emp_val is None or str(emp_val).strip() == '':
             continue
-        nif = ws.cell(row=row, column=cols.get('nif', 1)).value
-        codigo = ws.cell(row=row, column=cols.get('codigo', 2)).value
-        plantilla_employees.append({
+        plantilla_emps.append({
             'row': row,
-            'nombre': str(emp_name).strip(),
-            'nombre_norm': normalize(emp_name),
-            'nif': nif,
-            'codigo': codigo,
+            'nombre': str(emp_val).strip(),
+            'nombre_norm': normalize_name(emp_val),
+            'nif': ws.cell(row=row, column=cols.get('nif', 1)).value,
+            'codigo': ws.cell(row=row, column=cols.get('codigo', 2)).value,
         })
 
-    # Agrupar tramos por empleado normalizado
-    tramos_by_emp = defaultdict(list)
-    for t in tramos_to_inject:
-        key = normalize(t['empleado'])
-        tramos_by_emp[key] = tramos_by_emp.get(key, [])
+    debug_info['plantilla_count'] = len(plantilla_emps)
+    debug_info['plantilla_names_sample'] = [p['nombre_norm'] for p in plantilla_emps[:5]]
+
+    # 2. Agrupar tramos por empleado
+    tramos_by_emp = {}
+    for t in tramos:
+        key = normalize_name(t['empleado'])
+        if key not in tramos_by_emp:
+            tramos_by_emp[key] = []
         tramos_by_emp[key].append(t)
 
-    # Hacer match
-    matched_data = []  # Lista de (nif, codigo, nombre, tramo_data)
-    matched_employees = set()
-    unmatched_tramos = []
+    debug_info['tramos_keys_sample'] = list(tramos_by_emp.keys())[:5]
 
-    for emp_norm, emp_tramos in tramos_by_emp.items():
-        # Buscar en plantilla
+    # 3. Match y construir filas de salida
+    output_rows = []
+    matched_emp_norms = set()
+    unmatched = []
+
+    for tramo_emp_norm, emp_tramos in tramos_by_emp.items():
+        # Buscar match exacto
         found = None
-        for pe in plantilla_employees:
-            if pe['nombre_norm'] == emp_norm:
+        for pe in plantilla_emps:
+            if pe['nombre_norm'] == tramo_emp_norm:
                 found = pe
                 break
+
+        # Match parcial si no hay exacto
         if found is None:
-            # Match parcial
-            for pe in plantilla_employees:
-                if emp_norm in pe['nombre_norm'] or pe['nombre_norm'] in emp_norm:
+            for pe in plantilla_emps:
+                if tramo_emp_norm in pe['nombre_norm'] or pe['nombre_norm'] in tramo_emp_norm:
                     found = pe
                     break
 
         if found is None:
             for t in emp_tramos:
-                unmatched_tramos.append(t['empleado'])
+                unmatched.append(t['empleado'])
             continue
 
-        matched_employees.add(found['nombre_norm'])
+        matched_emp_norms.add(found['nombre_norm'])
+
         for t in emp_tramos:
-            matched_data.append({
+            output_rows.append({
                 'nif': found['nif'],
                 'codigo': found['codigo'],
                 'nombre': found['nombre'],
                 'fecha_ref': t.get('fecha'),
-                'zona': t.get('zona', '(UTC+01:00) Bruselas, Copenhague, Madrid, París'),
+                'zona': t.get('timezone_name') or zona_default,
                 'inicio': t.get('hora_inicio'),
                 'fin': t.get('hora_fin'),
                 'tipo_tramo': t.get('tipo_tramo'),
-                'sobrescritura': t.get('sobrescritura', 'Sí'),
+                'sobrescritura': sobrescritura_default,
             })
 
-    # Empleados sin match en tramos -> se eliminan de la plantilla
+    debug_info['matched_employees'] = len(matched_emp_norms)
+    debug_info['output_rows'] = len(output_rows)
+
+    # 4. Contar eliminados (empleados de plantilla sin tramos)
     removed = 0
-    for pe in plantilla_employees:
-        if pe['nombre_norm'] not in matched_employees:
+    for pe in plantilla_emps:
+        if pe['nombre_norm'] not in matched_emp_norms:
             removed += 1
 
-    # Guardar estilos de la fila 2 (primera fila de datos) para copiarlos
+    # 5. Guardar estilos de la primera fila de datos
     style_row = header_row + 1
     styles = {}
-    for col_idx in range(1, ws.max_column + 1):
-        styles[col_idx] = ws.cell(row=style_row, column=col_idx)
+    max_col = ws.max_column
+    for c in range(1, max_col + 1):
+        styles[c] = ws.cell(row=style_row, column=c)
 
-    # Limpiar todas las filas de datos existentes
-    for row in range(header_row + 1, ws.max_row + 1):
-        for col in range(1, ws.max_column + 1):
-            ws.cell(row=row, column=col).value = None
+    # 6. Limpiar filas de datos
+    old_max_row = ws.max_row
+    for row in range(header_row + 1, old_max_row + 1):
+        for c in range(1, max_col + 1):
+            ws.cell(row=row, column=c).value = None
 
-    # Escribir las filas con match
-    current_row = header_row + 1
-    for item in matched_data:
-        # Copiar estilo de la fila modelo
-        for col_idx in range(1, ws.max_column + 1):
-            copy_cell_style(styles[col_idx], ws.cell(row=current_row, column=col_idx))
+    # 7. Escribir filas de salida
+    for i, item in enumerate(output_rows):
+        row = header_row + 1 + i
+
+        # Copiar estilo
+        for c in range(1, max_col + 1):
+            copy_cell_style(styles[c], ws.cell(row=row, column=c))
 
         # Escribir datos
         if 'nif' in cols:
-            ws.cell(row=current_row, column=cols['nif']).value = item['nif']
+            ws.cell(row=row, column=cols['nif']).value = item['nif']
         if 'codigo' in cols:
-            ws.cell(row=current_row, column=cols['codigo']).value = item['codigo']
+            ws.cell(row=row, column=cols['codigo']).value = item['codigo']
         if 'empleado' in cols:
-            ws.cell(row=current_row, column=cols['empleado']).value = item['nombre']
+            ws.cell(row=row, column=cols['empleado']).value = item['nombre']
         if 'fecha_ref' in cols:
-            ws.cell(row=current_row, column=cols['fecha_ref']).value = item['fecha_ref']
+            ws.cell(row=row, column=cols['fecha_ref']).value = item['fecha_ref']
         if 'zona' in cols:
-            ws.cell(row=current_row, column=cols['zona']).value = item['zona']
+            ws.cell(row=row, column=cols['zona']).value = item['zona']
         if 'inicio' in cols:
-            ws.cell(row=current_row, column=cols['inicio']).value = item['inicio']
+            ws.cell(row=row, column=cols['inicio']).value = item['inicio']
         if 'fin' in cols:
-            ws.cell(row=current_row, column=cols['fin']).value = item['fin']
+            ws.cell(row=row, column=cols['fin']).value = item['fin']
         if 'tipo_tramo' in cols:
-            ws.cell(row=current_row, column=cols['tipo_tramo']).value = item['tipo_tramo']
+            ws.cell(row=row, column=cols['tipo_tramo']).value = item['tipo_tramo']
         if 'sobrescritura' in cols:
-            ws.cell(row=current_row, column=cols['sobrescritura']).value = item['sobrescritura']
+            ws.cell(row=row, column=cols['sobrescritura']).value = item['sobrescritura']
 
-        current_row += 1
-
-    return len(matched_data), removed, unmatched_tramos
+    return len(output_rows), removed, list(set(unmatched)), debug_info, None
 
 
 # ─────────────────────────────────────────────────
@@ -403,7 +407,7 @@ def main():
     col1, col2 = st.columns(2)
     with col1:
         st.subheader("1️⃣ Registros de Tramos")
-        st.caption("Excel con los fichajes (Fecha, Hora inicio, Hora fin, Empleado...)")
+        st.caption("Excel con fichajes (Fecha, Hora inicio, Hora fin, Empleado...)")
         tramos_file = st.file_uploader("Sube registros de tramos", type=['xlsx'], key='tramos')
     with col2:
         st.subheader("2️⃣ Plantilla Endalia")
@@ -419,8 +423,6 @@ def main():
             "(UTC+01:00) Bruselas, Copenhague, Madrid, París",
             "(UTC+00:00) Dublín, Edimburgo, Lisboa, Londres",
             "(UTC+02:00) Atenas, Bucarest, Estambul",
-            "(UTC-05:00) Hora del este (EE.UU. y Canadá)",
-            "(UTC-06:00) Hora central (EE.UU. y Canadá)",
         ])
         sobrescritura_default = st.selectbox("Sobrescritura por defecto", ["Sí", "No"])
 
@@ -428,9 +430,9 @@ def main():
         st.info("👆 Sube ambos archivos para continuar.")
         return
 
-    # ═══════════════════════════════════════════
+    # ═══════════════════════════════════════
     # PASO 1: Leer tramos
-    # ═══════════════════════════════════════════
+    # ═══════════════════════════════════════
     tramos_bytes = tramos_file.read()
     wb_tramos = openpyxl.load_workbook(BytesIO(tramos_bytes), data_only=True)
     tramos, tramos_cols, error = read_tramos(wb_tramos)
@@ -441,92 +443,104 @@ def main():
 
     st.success(f"✅ {len(tramos)} tramos leidos del archivo de registros.")
 
-    # ═══════════════════════════════════════════
-    # PASO 2: Detectar tramos sin Hora Fin
-    # ═══════════════════════════════════════════
+    # Mostrar columnas detectadas en tramos
+    with st.expander("🔎 Columnas detectadas en registros"):
+        ws_t = wb_tramos.active
+        for key, idx in tramos_cols.items():
+            header = ws_t.cell(row=1, column=idx).value
+            st.write(f"**{key}** → Col {idx} = \"{header}\"")
+
+    # ═══════════════════════════════════════
+    # PASO 2: Tramos sin Hora Fin
+    # ═══════════════════════════════════════
     tramos_sin_fin = [t for t in tramos if is_missing_hora_fin(t.get('hora_fin'))]
     tramos_con_fin = [t for t in tramos if not is_missing_hora_fin(t.get('hora_fin'))]
 
     if tramos_sin_fin:
-        st.warning(f"⚠️ **{len(tramos_sin_fin)}** tramos sin Hora Fin detectados. Introduce la hora fin para cada uno:")
-
+        st.warning(f"⚠️ **{len(tramos_sin_fin)}** tramos sin Hora Fin. Introduce la hora fin:")
         st.markdown("---")
         hora_fin_inputs = {}
-
         for i, t in enumerate(tramos_sin_fin):
-            col_a, col_b, col_c, col_d = st.columns([2, 2, 2, 2])
-            with col_a:
+            c1, c2, c3, c4 = st.columns([3, 2, 2, 2])
+            with c1:
                 st.write(f"**{t['empleado']}**")
-            with col_b:
-                st.write(f"📅 {format_date_for_display(t.get('fecha'))}")
-            with col_c:
-                st.write(f"🕐 Inicio: {format_time_for_display(t.get('hora_inicio'))}")
-            with col_d:
-                hora_fin_inputs[i] = st.time_input(
-                    f"Hora Fin",
-                    value=time(17, 0),
-                    key=f"hora_fin_{i}",
-                )
+            with c2:
+                st.write(f"📅 {fmt_date(t.get('fecha'))}")
+            with c3:
+                st.write(f"🕐 Inicio: {fmt_time(t.get('hora_inicio'))}")
+            with c4:
+                hora_fin_inputs[i] = st.time_input("Hora Fin", value=time(17, 0), key=f"hf_{i}")
         st.markdown("---")
 
-        # Aplicar las horas fin introducidas
         for i, t in enumerate(tramos_sin_fin):
             t['hora_fin'] = hora_fin_inputs[i]
 
-        # Juntar todos los tramos
         all_tramos = tramos_con_fin + tramos_sin_fin
     else:
         all_tramos = tramos
         st.info("✅ Todos los tramos tienen Hora Fin.")
 
-    # Aplicar valores por defecto
+    # Aplicar defaults
     for t in all_tramos:
-        if not t.get('zona'):
-            t['zona'] = zona_default
-        t['sobrescritura'] = sobrescritura_default
+        if not t.get('timezone_name'):
+            t['timezone_name'] = zona_default
 
-    # ═══════════════════════════════════════════
+    # ═══════════════════════════════════════
     # PASO 3: Preview
-    # ═══════════════════════════════════════════
-    with st.expander(f"👀 Vista previa de {len(all_tramos)} tramos a procesar"):
-        for t in all_tramos[:20]:
+    # ═══════════════════════════════════════
+    with st.expander(f"👀 Vista previa: {len(all_tramos)} tramos"):
+        for t in all_tramos[:30]:
             st.write(
                 f"**{t['empleado']}** | "
-                f"{format_date_for_display(t.get('fecha'))} | "
-                f"{format_time_for_display(t.get('hora_inicio'))} → "
-                f"{format_time_for_display(t.get('hora_fin'))} | "
+                f"{fmt_date(t.get('fecha'))} | "
+                f"{fmt_time(t.get('hora_inicio'))} → {fmt_time(t.get('hora_fin'))} | "
                 f"{t.get('tipo_tramo', '-')}"
             )
-        if len(all_tramos) > 20:
-            st.caption(f"... y {len(all_tramos) - 20} mas")
+        if len(all_tramos) > 30:
+            st.caption(f"... y {len(all_tramos) - 30} mas")
 
-    # ═══════════════════════════════════════════
+    # ═══════════════════════════════════════
     # PASO 4: Procesar
-    # ═══════════════════════════════════════════
+    # ═══════════════════════════════════════
     if st.button("🚀 Generar Plantilla", type="primary", use_container_width=True):
         with st.spinner("Procesando..."):
             try:
                 plantilla_bytes = plantilla_file.read()
 
-                # Backup de validaciones XML
+                # Validaciones originales
                 original_validations = extract_all_validations(plantilla_bytes)
                 st.info(f"🔍 {len(original_validations)} hoja(s) con validaciones detectadas.")
 
                 # Cargar plantilla
                 wb_template = openpyxl.load_workbook(BytesIO(plantilla_bytes), data_only=False)
 
-                # Escribir datos
-                written, removed, unmatched = build_and_write_plantilla(
-                    wb_template, all_tramos, template_sheet, header_row
+                # Conciliar
+                written, removed, unmatched, debug, err = conciliar(
+                    wb_template, all_tramos, template_sheet, header_row,
+                    zona_default, sobrescritura_default
                 )
+
+                if err:
+                    st.error(f"❌ {err}")
+                    return
+
+                # Debug info
+                with st.expander("🐛 Info de depuracion"):
+                    st.json({
+                        'columnas_plantilla': {k: v for k, v in debug['cols'].items()},
+                        'empleados_en_plantilla': debug['plantilla_count'],
+                        'nombres_plantilla_sample': debug.get('plantilla_names_sample', []),
+                        'nombres_tramos_sample': debug.get('tramos_keys_sample', []),
+                        'empleados_matched': debug['matched_employees'],
+                        'filas_output': debug['output_rows'],
+                    })
 
                 st.success(f"✅ **{written}** filas escritas en la plantilla.")
                 if removed:
-                    st.info(f"🗑️ **{removed}** empleados sin tramos eliminados de la plantilla.")
+                    st.info(f"🗑️ **{removed}** empleados sin tramos eliminados.")
                 if unmatched:
-                    unique_unmatched = list(set(unmatched))
-                    with st.expander(f"⚠️ {len(unique_unmatched)} empleados de tramos sin match en plantilla"):
-                        for name in sorted(unique_unmatched):
+                    with st.expander(f"⚠️ {len(unmatched)} empleados sin match"):
+                        for name in sorted(unmatched):
                             st.write(f"- {name}")
 
                 # Guardar
@@ -534,14 +548,14 @@ def main():
                 wb_template.save(output_buffer)
                 output_bytes = output_buffer.getvalue()
 
-                # Parche XML para preservar validaciones
-                st.info("🔧 Re-inyectando validaciones XML...")
+                # Parche XML
+                st.info("🔧 Re-inyectando validaciones...")
                 output_bytes = patch_zip_with_validations(output_bytes, plantilla_bytes)
 
                 # Verificacion
                 final_vals = extract_all_validations(output_bytes)
                 if final_vals:
-                    st.success(f"🎯 Verificacion OK: {len(final_vals)} hoja(s) con desplegables intactos.")
+                    st.success(f"🎯 Verificacion OK: {len(final_vals)} hoja(s) con desplegables.")
                 else:
                     st.warning("⚠️ No se detectaron validaciones en el archivo final.")
 
