@@ -471,16 +471,14 @@ def main():
 
     if st.button("Aplicar hora", use_container_width=True):
         if seleccion:
-            indices = []
             if "— Todos —" in seleccion:
                 indices = list(range(len(tramos_sin_fin)))
             else:
                 indices = [i for i, t in enumerate(tramos_sin_fin) if t['empleado'] in seleccion]
-            apply_mass_hora(indices, hora_masiva)
-            n = len(indices)
-            st.toast(f"Hora {hora_masiva.strftime('%H:%M')} aplicada a {n} tramo(s)")
-        else:
-            st.toast("Selecciona al menos un empleado", icon="⚠️")
+            for i in indices:
+                st.session_state.horas_fin[i] = hora_masiva
+                st.session_state[f"hf_{i}"] = hora_masiva
+            st.rerun()
 
     st.markdown("")
     st.markdown("##### Detalle por tramo")
