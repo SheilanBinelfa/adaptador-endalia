@@ -4,10 +4,24 @@ from openpyxl.worksheet.datavalidation import DataValidation
 from io import BytesIO
 from copy import copy
 from zipfile import ZipFile, ZIP_DEFLATED
-from lxml import etree
+import xml.etree.ElementTree as ET
 import re
 import json
 from datetime import datetime, date
+
+# Namespace de SpreadsheetML
+SPREADSHEET_NS = 'http://schemas.openxmlformats.org/spreadsheetml/2006/main'
+# Registrar namespace para que ET no genere prefijos ns0:
+ET.register_namespace('', SPREADSHEET_NS)
+# Registrar otros namespaces comunes que pueden aparecer en hojas xlsx
+ET.register_namespace('r', 'http://schemas.openxmlformats.org/officeDocument/2006/relationships')
+ET.register_namespace('mc', 'http://schemas.openxmlformats.org/markup-compatibility/2006')
+ET.register_namespace('x14ac', 'http://schemas.microsoft.com/office/spreadsheetml/2009/9/ac')
+ET.register_namespace('xr', 'http://schemas.microsoft.com/office/spreadsheetml/2014/revision')
+ET.register_namespace('xr2', 'http://schemas.microsoft.com/office/spreadsheetml/2015/revision2')
+ET.register_namespace('xr3', 'http://schemas.microsoft.com/office/spreadsheetml/2016/revision3')
+ET.register_namespace('xr6', 'http://schemas.microsoft.com/office/spreadsheetml/2014/revision6')
+ET.register_namespace('xr10', 'http://schemas.microsoft.com/office/spreadsheetml/2018/revision10')
 
 # ─────────────────────────────────────────────────────────────
 # UTILIDADES DE PRESERVACIÓN DE VALIDACIONES
@@ -16,19 +30,20 @@ from datetime import datetime, date
 def extract_validations_from_zip(file_bytes: bytes) -> dict:
     """
     Extrae los nodos XML <dataValidations> directamente del ZIP del .xlsx.
-    Retorna un dict: { 'xl/worksheets/sheet1.xml': etree.Element, ... }
+    Retorna un dict: { 'xl/worksheets/sheet1.xml': str_xml, ... }
     """
     validations = {}
+    ns = f'{{{SPREADSHEET_NS}}}'
+
     with ZipFile(BytesIO(file_bytes), 'r') as zf:
         for name in zf.namelist():
             if re.match(r'xl/worksheets/sheet\d+\.xml', name):
                 xml_bytes = zf.read(name)
-                tree = etree.fromstring(xml_bytes)
-                ns = {'s': 'http://schemas.openxmlformats.org/spreadsheetml/2006/main'}
-                dv_nodes = tree.findall('.//s:dataValidations', ns)
-                if dv_nodes:
-                    for dv_node in dv_nodes:
-                        validations[name] = etree.tostring(dv_node, encoding='unicode')
+                tree = ET.fromstring(xml_bytes)
+                # Buscar <dataValidations> (con namespace)
+                dv_node = tree.find(f'{ns}dataValidations')
+                if dv_node is not None:
+                    validations[name] = ET.tostring(dv_node, encoding='unicode')
     return validations
 
 
@@ -36,11 +51,8 @@ def reinject_validations_into_zip(output_bytes: bytes, original_validations: dic
     """
     FALLBACK CRÍTICO: Re-inyecta los nodos <dataValidations> en el XML
     de cada hoja dentro del archivo ZIP resultante.
-    Esto garantiza que incluso si openpyxl descartó las validaciones,
-    se restauran bit a bit desde el original.
     """
-    ns = 'http://schemas.openxmlformats.org/spreadsheetml/2006/main'
-    ns_map = {'s': ns}
+    ns = f'{{{SPREADSHEET_NS}}}'
 
     input_zip = ZipFile(BytesIO(output_bytes), 'r')
     output_buffer = BytesIO()
@@ -51,26 +63,26 @@ def reinject_validations_into_zip(output_bytes: bytes, original_validations: dic
 
         if item in original_validations:
             # Parsear el XML de la hoja
-            tree = etree.fromstring(data)
+            tree = ET.fromstring(data)
 
-            # Eliminar cualquier <dataValidations> residual (puede estar vacío)
-            existing = tree.findall(f'{{{ns}}}dataValidations')
-            for ex in existing:
-                tree.remove(ex)
+            # Eliminar cualquier <dataValidations> residual
+            existing = tree.find(f'{ns}dataValidations')
+            if existing is not None:
+                tree.remove(existing)
 
             # Parsear el nodo original preservado
-            original_dv = etree.fromstring(original_validations[item])
+            original_dv = ET.fromstring(original_validations[item])
 
             # Insertar ANTES de ciertos nodos para mantener orden XML válido
             # Orden típico: ... sheetData ... dataValidations ... pageMargins ...
             insert_before_tags = [
-                f'{{{ns}}}pageMargins',
-                f'{{{ns}}}pageSetup',
-                f'{{{ns}}}headerFooter',
-                f'{{{ns}}}drawing',
-                f'{{{ns}}}legacyDrawing',
-                f'{{{ns}}}tableParts',
-                f'{{{ns}}}extLst',
+                f'{ns}pageMargins',
+                f'{ns}pageSetup',
+                f'{ns}headerFooter',
+                f'{ns}drawing',
+                f'{ns}legacyDrawing',
+                f'{ns}tableParts',
+                f'{ns}extLst',
             ]
 
             inserted = False
@@ -83,10 +95,11 @@ def reinject_validations_into_zip(output_bytes: bytes, original_validations: dic
                     break
 
             if not inserted:
-                # Si no encontramos ninguno, lo ponemos al final
                 tree.append(original_dv)
 
-            data = etree.tostring(tree, xml_declaration=True, encoding='UTF-8', standalone=True)
+            # Generar XML con declaración
+            data = b'<?xml version="1.0" encoding="UTF-8" standalone="yes"?>\n'
+            data += ET.tostring(tree, encoding='unicode').encode('utf-8')
 
         output_zip.writestr(item, data)
 
@@ -124,7 +137,6 @@ def restore_openpyxl_validations(ws, snapshot):
     """Re-aplica validaciones desde snapshot si la hoja las perdió."""
     if not snapshot:
         return
-    # Limpiar existentes
     ws.data_validations.dataValidation = []
     for item in snapshot:
         dv = DataValidation(
@@ -170,7 +182,7 @@ def find_column_indices(ws, header_row=1):
         for key, terms in keywords.items():
             for term in terms:
                 if term in cell_lower:
-                    if key not in columns:  # Primera coincidencia gana
+                    if key not in columns:
                         columns[key] = col_idx
                     break
 
@@ -180,7 +192,6 @@ def find_column_indices(ws, header_row=1):
 def extract_employees_from_records(wb_records, sheet_name=None):
     """
     Extrae registros de empleados del archivo de registros.
-    Retorna lista de dicts con nombre, inicio, fin, fecha.
     """
     ws = wb_records[sheet_name] if sheet_name else wb_records.active
     cols = find_column_indices(ws)
@@ -226,7 +237,6 @@ def match_and_update(ws_template, employees, header_row=1):
     if 'nombre' not in cols:
         return 0, "No se encontró columna de nombre en la plantilla."
 
-    # Construir índice de empleados por nombre normalizado
     emp_index = {}
     for emp in employees:
         key = normalize_name(emp['nombre'])
@@ -245,7 +255,6 @@ def match_and_update(ws_template, employees, header_row=1):
         # Matching: exacto primero, luego parcial
         match = emp_index.get(key)
         if match is None:
-            # Matching parcial
             for emp_key, emp_data in emp_index.items():
                 if emp_key in key or key in emp_key:
                     match = emp_data
@@ -255,7 +264,7 @@ def match_and_update(ws_template, employees, header_row=1):
             not_found.append(str(cell_name).strip())
             continue
 
-        # === ACTUALIZAR SOLO .value — NO tocar formato ni estructura ===
+        # === ACTUALIZAR SOLO .value ===
         changed = False
         if 'inicio' in cols and 'inicio' in match and match['inicio'] is not None:
             ws_template.cell(row=row, column=cols['inicio']).value = match['inicio']
@@ -331,7 +340,7 @@ def main():
         if st.button("🚀 Procesar y Generar Archivo", type="primary", use_container_width=True):
             with st.spinner("Procesando..."):
                 try:
-                    # ── PASO 1: Leer bytes originales de la plantilla ──
+                    # ── PASO 1: Leer bytes originales ──
                     template_bytes = template_file.read()
                     records_bytes = records_file.read()
 
@@ -352,11 +361,11 @@ def main():
                     # ── PASO 3: Cargar workbooks con openpyxl ──
                     wb_template = openpyxl.load_workbook(
                         BytesIO(template_bytes),
-                        data_only=False  # CRÍTICO: preservar fórmulas
+                        data_only=False
                     )
                     wb_records = openpyxl.load_workbook(
                         BytesIO(records_bytes),
-                        data_only=True  # Queremos valores resueltos
+                        data_only=True
                     )
 
                     # Seleccionar hojas
@@ -369,7 +378,7 @@ def main():
                     dv_snapshot = snapshot_openpyxl_validations(ws_template)
                     st.write(f"📌 Validaciones capturadas por openpyxl: **{len(dv_snapshot)}**")
 
-                    # ── PASO 5: Extraer empleados del archivo de registros ──
+                    # ── PASO 5: Extraer empleados ──
                     employees, error = extract_employees_from_records(
                         wb_records,
                         records_sheet if records_sheet else None
@@ -381,7 +390,6 @@ def main():
 
                     st.write(f"👥 Empleados encontrados en registros: **{len(employees)}**")
 
-                    # Preview
                     with st.expander("👀 Vista previa de registros"):
                         for emp in employees[:10]:
                             st.write(emp)
@@ -476,4 +484,3 @@ def main():
 
 
 if __name__ == '__main__':
-    main()
