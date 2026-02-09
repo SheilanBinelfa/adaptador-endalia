@@ -20,9 +20,9 @@ ET.register_namespace('xr6', 'http://schemas.microsoft.com/office/spreadsheetml/
 ET.register_namespace('xr10', 'http://schemas.microsoft.com/office/spreadsheetml/2018/revision10')
 
 
-# ─────────────────────────────────────────────────
+# ═══════════════════════════════════════════════════
 # XML / ZIP — Preservar validaciones
-# ─────────────────────────────────────────────────
+# ═══════════════════════════════════════════════════
 
 def extract_all_validations(file_bytes):
     validations = {}
@@ -121,31 +121,87 @@ def patch_zip_with_validations(output_bytes, original_bytes):
     return result_buffer.getvalue()
 
 
-# ─────────────────────────────────────────────────
-# Normalización de nombres
-# ─────────────────────────────────────────────────
+# ═══════════════════════════════════════════════════
+# Normalización
+# ═══════════════════════════════════════════════════
 
 def remove_accents(text):
-    """Quita acentos: é->e, ñ->n, etc."""
     nfkd = unicodedata.normalize('NFKD', text)
     return ''.join(c for c in nfkd if not unicodedata.category(c).startswith('M'))
 
 
 def normalize_name(name):
-    """Normaliza nombre para matching robusto."""
     if name is None:
         return ''
-    s = str(name).strip()
-    s = s.lower()
+    s = str(name).strip().lower()
     s = remove_accents(s)
-    s = re.sub(r'\s+', ' ', s)
-    s = s.strip()
+    s = re.sub(r'\s+', ' ', s).strip()
     return s
 
 
-# ─────────────────────────────────────────────────
+# ═══════════════════════════════════════════════════
+# Utilidades de fecha/hora
+# ═══════════════════════════════════════════════════
+
+def extract_time_part(val):
+    if val is None:
+        return None
+    if isinstance(val, time):
+        return val
+    if isinstance(val, datetime):
+        return val.time()
+    s = str(val).strip()
+    m = re.match(r'(\d{1,2}):(\d{2})', s)
+    if m:
+        return time(int(m.group(1)), int(m.group(2)))
+    return None
+
+
+def extract_date_part(val):
+    if val is None:
+        return None
+    if isinstance(val, datetime):
+        return val.date()
+    if isinstance(val, date):
+        return val
+    s = str(val).strip()
+    for fmt in ['%d/%m/%Y', '%Y-%m-%d', '%d-%m-%Y']:
+        try:
+            return datetime.strptime(s, fmt).date()
+        except ValueError:
+            continue
+    return None
+
+
+def combine_date_time(fecha_val, hora_val):
+    d = extract_date_part(fecha_val)
+    t = extract_time_part(hora_val)
+    if d is None or t is None:
+        return None
+    return datetime.combine(d, t)
+
+
+def fmt_time(val):
+    if val is None:
+        return ''
+    if isinstance(val, time):
+        return val.strftime('%H:%M')
+    if isinstance(val, datetime):
+        return val.strftime('%H:%M')
+    return str(val)
+
+
+def fmt_date(val):
+    if val is None:
+        return ''
+    if isinstance(val, (datetime, date)):
+        return val.strftime('%d/%m/%Y')
+    return str(val)
+
+
+# ═══════════════════════════════════════════════════
 # Lectura de Registros de Tramos
-# ─────────────────────────────────────────────────
+# ═══════════════════════════════════════════════════
 
 def read_tramos(wb):
     ws = wb.active
@@ -200,43 +256,22 @@ def is_missing_hora_fin(hora_fin):
     return s == '' or s in ('00:00', '0:00', '00:00:00')
 
 
-def fmt_time(val):
-    if val is None:
-        return ''
-    if isinstance(val, time):
-        return val.strftime('%H:%M')
-    if isinstance(val, datetime):
-        return val.strftime('%H:%M')
-    return str(val)
-
-
-def fmt_date(val):
-    if val is None:
-        return ''
-    if isinstance(val, (datetime, date)):
-        return val.strftime('%d/%m/%Y')
-    return str(val)
-
-
-# ─────────────────────────────────────────────────
-# Detección de columnas de la plantilla
-# ─────────────────────────────────────────────────
+# ═══════════════════════════════════════════════════
+# Detección de columnas plantilla
+# ═══════════════════════════════════════════════════
 
 def find_plantilla_columns(ws, header_row=1):
     cols = {}
-    # Recorrer todas las columnas y asignar por header exacto/parcial
     for col in range(1, ws.max_column + 1):
         val = ws.cell(row=header_row, column=col).value
         if val is None:
             continue
         h = str(val).strip().lower()
-
         if 'doc. identificador' in h or h == 'nif' or h == 'dni':
             cols.setdefault('nif', col)
         elif 'codigo empleado' in h or 'código empleado' in h:
             cols.setdefault('codigo', col)
         elif h == 'empleado':
-            # Solo match EXACTO para evitar confundir con "Código empleado"
             cols.setdefault('empleado', col)
         elif 'fecha de referencia' in h:
             cols.setdefault('fecha_ref', col)
@@ -250,7 +285,6 @@ def find_plantilla_columns(ws, header_row=1):
             cols.setdefault('tipo_tramo', col)
         elif 'sobrescritura' in h:
             cols.setdefault('sobrescritura', col)
-
     return cols
 
 
@@ -264,9 +298,9 @@ def copy_cell_style(src, tgt):
         tgt.alignment = copy(src.alignment)
 
 
-# ─────────────────────────────────────────────────
+# ═══════════════════════════════════════════════════
 # Motor de conciliación
-# ─────────────────────────────────────────────────
+# ═══════════════════════════════════════════════════
 
 def conciliar(wb_template, tramos, template_sheet_name, header_row, zona_default, sobrescritura_default):
     if template_sheet_name and template_sheet_name in wb_template.sheetnames:
@@ -287,7 +321,6 @@ def conciliar(wb_template, tramos, template_sheet_name, header_row, zona_default
         if emp_val is None or str(emp_val).strip() == '':
             continue
         plantilla_emps.append({
-            'row': row,
             'nombre': str(emp_val).strip(),
             'nombre_norm': normalize_name(emp_val),
             'nif': ws.cell(row=row, column=cols.get('nif', 1)).value,
@@ -296,6 +329,11 @@ def conciliar(wb_template, tramos, template_sheet_name, header_row, zona_default
 
     debug_info['plantilla_count'] = len(plantilla_emps)
     debug_info['plantilla_names_sample'] = [p['nombre_norm'] for p in plantilla_emps[:5]]
+
+    # Índice por nombre normalizado
+    plantilla_index = {}
+    for pe in plantilla_emps:
+        plantilla_index[pe['nombre_norm']] = pe
 
     # 2. Agrupar tramos por empleado
     tramos_by_emp = {}
@@ -313,17 +351,10 @@ def conciliar(wb_template, tramos, template_sheet_name, header_row, zona_default
     unmatched = []
 
     for tramo_emp_norm, emp_tramos in tramos_by_emp.items():
-        # Buscar match exacto
-        found = None
-        for pe in plantilla_emps:
-            if pe['nombre_norm'] == tramo_emp_norm:
-                found = pe
-                break
-
-        # Match parcial si no hay exacto
+        found = plantilla_index.get(tramo_emp_norm)
         if found is None:
-            for pe in plantilla_emps:
-                if tramo_emp_norm in pe['nombre_norm'] or pe['nombre_norm'] in tramo_emp_norm:
+            for pe_norm, pe in plantilla_index.items():
+                if tramo_emp_norm in pe_norm or pe_norm in tramo_emp_norm:
                     found = pe
                     break
 
@@ -335,14 +366,18 @@ def conciliar(wb_template, tramos, template_sheet_name, header_row, zona_default
         matched_emp_norms.add(found['nombre_norm'])
 
         for t in emp_tramos:
+            fecha_ref = t.get('fecha')
+            inicio_dt = combine_date_time(fecha_ref, t.get('hora_inicio'))
+            fin_dt = combine_date_time(fecha_ref, t.get('hora_fin'))
+
             output_rows.append({
                 'nif': found['nif'],
                 'codigo': found['codigo'],
                 'nombre': found['nombre'],
-                'fecha_ref': t.get('fecha'),
-                'zona': t.get('timezone_name') or zona_default,
-                'inicio': t.get('hora_inicio'),
-                'fin': t.get('hora_fin'),
+                'fecha_ref': extract_date_part(fecha_ref),
+                'zona': zona_default,
+                'inicio': inicio_dt,
+                'fin': fin_dt,
                 'tipo_tramo': t.get('tipo_tramo'),
                 'sobrescritura': sobrescritura_default,
             })
@@ -350,20 +385,20 @@ def conciliar(wb_template, tramos, template_sheet_name, header_row, zona_default
     debug_info['matched_employees'] = len(matched_emp_norms)
     debug_info['output_rows'] = len(output_rows)
 
-    # 4. Contar eliminados (empleados de plantilla sin tramos)
+    # 4. Contar eliminados
     removed = 0
     for pe in plantilla_emps:
         if pe['nombre_norm'] not in matched_emp_norms:
             removed += 1
 
-    # 5. Guardar estilos de la primera fila de datos
+    # 5. Guardar estilos de fila modelo
     style_row = header_row + 1
     styles = {}
     max_col = ws.max_column
     for c in range(1, max_col + 1):
         styles[c] = ws.cell(row=style_row, column=c)
 
-    # 6. Limpiar filas de datos
+    # 6. Limpiar todas las filas de datos
     old_max_row = ws.max_row
     for row in range(header_row + 1, old_max_row + 1):
         for c in range(1, max_col + 1):
@@ -373,11 +408,9 @@ def conciliar(wb_template, tramos, template_sheet_name, header_row, zona_default
     for i, item in enumerate(output_rows):
         row = header_row + 1 + i
 
-        # Copiar estilo
         for c in range(1, max_col + 1):
             copy_cell_style(styles[c], ws.cell(row=row, column=c))
 
-        # Escribir datos
         if 'nif' in cols:
             ws.cell(row=row, column=cols['nif']).value = item['nif']
         if 'codigo' in cols:
@@ -385,13 +418,19 @@ def conciliar(wb_template, tramos, template_sheet_name, header_row, zona_default
         if 'empleado' in cols:
             ws.cell(row=row, column=cols['empleado']).value = item['nombre']
         if 'fecha_ref' in cols:
-            ws.cell(row=row, column=cols['fecha_ref']).value = item['fecha_ref']
+            cell = ws.cell(row=row, column=cols['fecha_ref'])
+            cell.value = item['fecha_ref']
+            cell.number_format = 'DD/MM/YYYY'
         if 'zona' in cols:
             ws.cell(row=row, column=cols['zona']).value = item['zona']
         if 'inicio' in cols:
-            ws.cell(row=row, column=cols['inicio']).value = item['inicio']
+            cell = ws.cell(row=row, column=cols['inicio'])
+            cell.value = item['inicio']
+            cell.number_format = 'DD/MM/YYYY HH:MM'
         if 'fin' in cols:
-            ws.cell(row=row, column=cols['fin']).value = item['fin']
+            cell = ws.cell(row=row, column=cols['fin'])
+            cell.value = item['fin']
+            cell.number_format = 'DD/MM/YYYY HH:MM'
         if 'tipo_tramo' in cols:
             ws.cell(row=row, column=cols['tipo_tramo']).value = item['tipo_tramo']
         if 'sobrescritura' in cols:
@@ -400,14 +439,14 @@ def conciliar(wb_template, tramos, template_sheet_name, header_row, zona_default
     return len(output_rows), removed, list(set(unmatched)), debug_info, None
 
 
-# ─────────────────────────────────────────────────
+# ═══════════════════════════════════════════════════
 # STREAMLIT UI
-# ─────────────────────────────────────────────────
+# ═══════════════════════════════════════════════════
 
 def main():
     st.set_page_config(page_title="Conciliador Endalia", page_icon="📊", layout="wide")
     st.title("📊 Conciliador de Tramos → Plantilla Endalia")
-    st.markdown("Importa tramos de fichaje a la plantilla Endalia preservando desplegables y formato.")
+    st.markdown("Importa tramos **sin hora fin** a la plantilla Endalia preservando desplegables y formato.")
     st.divider()
 
     col1, col2 = st.columns(2)
@@ -441,88 +480,78 @@ def main():
     # ═══════════════════════════════════════
     tramos_bytes = tramos_file.read()
     wb_tramos = openpyxl.load_workbook(BytesIO(tramos_bytes), data_only=True)
-    tramos, tramos_cols, error = read_tramos(wb_tramos)
+    tramos_all, tramos_cols, error = read_tramos(wb_tramos)
 
     if error:
         st.error(f"❌ {error}")
         return
 
-    st.success(f"✅ {len(tramos)} tramos leidos del archivo de registros.")
+    # Filtrar: solo tramos SIN hora fin
+    tramos_sin_fin = [t for t in tramos_all if is_missing_hora_fin(t.get('hora_fin'))]
+    tramos_con_fin = [t for t in tramos_all if not is_missing_hora_fin(t.get('hora_fin'))]
 
-    # Mostrar columnas detectadas en tramos
-    with st.expander("🔎 Columnas detectadas en registros"):
-        ws_t = wb_tramos.active
-        for key, idx in tramos_cols.items():
-            header = ws_t.cell(row=1, column=idx).value
-            st.write(f"**{key}** → Col {idx} = \"{header}\"")
+    st.success(
+        f"✅ {len(tramos_all)} tramos leidos: "
+        f"**{len(tramos_con_fin)}** completos (se ignoran), "
+        f"**{len(tramos_sin_fin)}** sin hora fin (a importar)."
+    )
+
+    if not tramos_sin_fin:
+        st.info("✅ Todos los tramos ya tienen Hora Fin. No hay nada que importar.")
+        return
 
     # ═══════════════════════════════════════
-    # PASO 2: Tramos sin Hora Fin
+    # PASO 2: Pedir hora fin por interfaz
     # ═══════════════════════════════════════
-    tramos_sin_fin = [t for t in tramos if is_missing_hora_fin(t.get('hora_fin'))]
-    tramos_con_fin = [t for t in tramos if not is_missing_hora_fin(t.get('hora_fin'))]
+    st.subheader(f"🕐 Completa la Hora Fin de {len(tramos_sin_fin)} tramos:")
+    st.markdown("---")
 
-    if tramos_sin_fin:
-        st.warning(f"⚠️ **{len(tramos_sin_fin)}** tramos sin Hora Fin. Introduce la hora fin:")
-        st.markdown("---")
-        hora_fin_inputs = {}
-        for i, t in enumerate(tramos_sin_fin):
-            c1, c2, c3, c4 = st.columns([3, 2, 2, 2])
-            with c1:
-                st.write(f"**{t['empleado']}**")
-            with c2:
-                st.write(f"📅 {fmt_date(t.get('fecha'))}")
-            with c3:
-                st.write(f"🕐 Inicio: {fmt_time(t.get('hora_inicio'))}")
-            with c4:
-                hora_fin_inputs[i] = st.time_input("Hora Fin", value=time(17, 0), key=f"hf_{i}")
-        st.markdown("---")
+    hora_fin_inputs = {}
+    for i, t in enumerate(tramos_sin_fin):
+        c1, c2, c3, c4 = st.columns([3, 2, 2, 2])
+        with c1:
+            st.write(f"**{t['empleado']}**")
+        with c2:
+            st.write(f"📅 {fmt_date(t.get('fecha'))}")
+        with c3:
+            st.write(f"🕐 Inicio: {fmt_time(t.get('hora_inicio'))}")
+        with c4:
+            hora_fin_inputs[i] = st.time_input("Hora Fin", value=time(17, 0), key=f"hf_{i}")
 
-        for i, t in enumerate(tramos_sin_fin):
-            t['hora_fin'] = hora_fin_inputs[i]
+    st.markdown("---")
 
-        all_tramos = tramos_con_fin + tramos_sin_fin
-    else:
-        all_tramos = tramos
-        st.info("✅ Todos los tramos tienen Hora Fin.")
-
-    # Aplicar defaults
-    for t in all_tramos:
-        if not t.get('timezone_name'):
-            t['timezone_name'] = zona_default
+    # Aplicar horas introducidas
+    for i, t in enumerate(tramos_sin_fin):
+        t['hora_fin'] = hora_fin_inputs[i]
 
     # ═══════════════════════════════════════
     # PASO 3: Preview
     # ═══════════════════════════════════════
-    with st.expander(f"👀 Vista previa: {len(all_tramos)} tramos"):
-        for t in all_tramos[:30]:
+    with st.expander(f"👀 Vista previa: {len(tramos_sin_fin)} tramos a importar"):
+        for t in tramos_sin_fin:
+            fecha = fmt_date(t.get('fecha'))
+            inicio = fmt_time(t.get('hora_inicio'))
+            fin = fmt_time(t.get('hora_fin'))
             st.write(
-                f"**{t['empleado']}** | "
-                f"{fmt_date(t.get('fecha'))} | "
-                f"{fmt_time(t.get('hora_inicio'))} → {fmt_time(t.get('hora_fin'))} | "
-                f"{t.get('tipo_tramo', '-')}"
+                f"**{t['empleado']}** | {fecha} | "
+                f"{inicio} → {fin} | {t.get('tipo_tramo', '-')}"
             )
-        if len(all_tramos) > 30:
-            st.caption(f"... y {len(all_tramos) - 30} mas")
 
     # ═══════════════════════════════════════
-    # PASO 4: Procesar
+    # PASO 4: Generar
     # ═══════════════════════════════════════
     if st.button("🚀 Generar Plantilla", type="primary", use_container_width=True):
         with st.spinner("Procesando..."):
             try:
                 plantilla_bytes = plantilla_file.read()
 
-                # Validaciones originales
                 original_validations = extract_all_validations(plantilla_bytes)
                 st.info(f"🔍 {len(original_validations)} hoja(s) con validaciones detectadas.")
 
-                # Cargar plantilla
                 wb_template = openpyxl.load_workbook(BytesIO(plantilla_bytes), data_only=False)
 
-                # Conciliar
                 written, removed, unmatched, debug, err = conciliar(
-                    wb_template, all_tramos, template_sheet, header_row,
+                    wb_template, tramos_sin_fin, template_sheet, header_row,
                     zona_default, sobrescritura_default
                 )
 
@@ -530,7 +559,6 @@ def main():
                     st.error(f"❌ {err}")
                     return
 
-                # Debug info
                 with st.expander("🐛 Info de depuracion"):
                     st.json({
                         'columnas_plantilla': {k: v for k, v in debug['cols'].items()},
@@ -558,7 +586,6 @@ def main():
                 st.info("🔧 Re-inyectando validaciones...")
                 output_bytes = patch_zip_with_validations(output_bytes, plantilla_bytes)
 
-                # Verificacion
                 final_vals = extract_all_validations(output_bytes)
                 if final_vals:
                     st.success(f"🎯 Verificacion OK: {len(final_vals)} hoja(s) con desplegables.")
