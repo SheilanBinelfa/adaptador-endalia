@@ -5,40 +5,39 @@ from io import BytesIO
 # Configuración de la página
 st.set_page_config(page_title="Test de Integridad Endalia", page_icon="🧪")
 
-st.title("🧪 Fase 1: Prueba de Integridad")
+st.title("🧪 Fase 1: Prueba de Espejo")
 st.markdown("""
-Sube tu plantilla original de Endalia. El programa la leerá y te permitirá descargarla 
-**sin hacer ningún cambio**. 
-    
-**Objetivo:** Verificar que el archivo descargado (`test_integridad.xlsx`) sigue teniendo las flechitas de los desplegables en Excel.
+Esta versión intenta devolverte el archivo **exactamente** como entró, 
+sin que Excel detecte que ha sido manipulado por un software externo.
 """)
 
-# Cargador de archivo
 uploaded_file = st.file_uploader("Sube la plantilla de Endalia aquí", type=["xlsx"])
 
 if uploaded_file:
     try:
-        # Paso 1: Leer el archivo de forma "cruda"
-        # keep_vba=True mantiene estructuras complejas y macros si las hubiera
-        # data_only=False asegura que no perdamos las fórmulas/validaciones
+        # Cargamos el archivo original
+        # keep_vba=True es crucial para que no borre las validaciones ocultas
+        # data_only=False evita que se pierdan las fórmulas
         wb = load_workbook(uploaded_file, data_only=False, keep_vba=True)
         
-        st.success("✅ Archivo cargado en memoria correctamente.")
+        st.success("✅ Archivo cargado en memoria.")
         
-        # Paso 2: Guardarlo en un buffer (en memoria) sin modificar nada
+        # Guardamos en un buffer intermedio
         output = BytesIO()
         wb.save(output)
-        processed_data = output.getvalue()
         
-        # Paso 3: Botón de descarga
+        # Forzamos que el puntero vuelva al inicio para que Streamlit lea el archivo completo
+        output.seek(0)
+        processed_data = output.read()
+
         st.download_button(
             label="📥 Descargar copia de prueba",
             data=processed_data,
-            file_name="test_integridad.xlsx",
+            file_name="test_espejo.xlsx",
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
         )
         
-        st.info("💡 Instrucciones: Descarga el archivo, ábrelo en tu ordenador y confirma si puedes ver los desplegables en las columnas correspondientes.")
+        st.info("💡 Si este archivo abre y tiene los desplegables, ya podemos meter la lógica de los 14 tramos.")
 
     except Exception as e:
-        st.error(f"Hubo un error al procesar el archivo: {e}")
+        st.error(f"Error técnico: {e}")
