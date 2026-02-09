@@ -1,43 +1,49 @@
 import streamlit as st
-from openpyxl import load_workbook
+import openpyxl
 from io import BytesIO
 
-# Configuración de la página
-st.set_page_config(page_title="Test de Integridad Endalia", page_icon="🧪")
+# --- CONFIGURACIÓN DE LA PÁGINA ---
+st.set_page_config(page_title="Reparador de Integridad", page_icon="🛠️")
 
-st.title("🧪 Fase 1: Prueba de Espejo")
+st.title("🛠️ Fase 1: Prueba de Flujo Limpio")
 st.markdown("""
-Esta versión intenta devolverte el archivo **exactamente** como entró, 
-sin que Excel detecte que ha sido manipulado por un software externo.
+Si el error de 'archivo dañado' persiste, es probable que la plantilla tenga una estructura protegida. 
+Este código utiliza un método de carga y guardado directo para intentar mantener la compatibilidad total con Excel.
 """)
 
-uploaded_file = st.file_uploader("Sube la plantilla de Endalia aquí", type=["xlsx"])
+# Cargador de archivos
+uploaded_file = st.file_uploader("Sube la plantilla de Endalia", type=["xlsx"])
 
 if uploaded_file:
     try:
-        # Cargamos el archivo original
-        # keep_vba=True es crucial para que no borre las validaciones ocultas
-        # data_only=False evita que se pierdan las fórmulas
-        wb = load_workbook(uploaded_file, data_only=False, keep_vba=True)
+        # Leemos el archivo en un buffer de entrada
+        file_bytes = uploaded_file.read()
+        input_buffer = BytesIO(file_bytes)
         
-        st.success("✅ Archivo cargado en memoria.")
+        # Cargamos el libro de trabajo (workbook)
+        # keep_vba=True es esencial para mantener macros o validaciones avanzadas
+        # data_only=False asegura que las fórmulas no se conviertan en valores estáticos
+        wb = openpyxl.load_workbook(input_buffer, data_only=False, keep_vba=True)
         
-        # Guardamos en un buffer intermedio
-        output = BytesIO()
-        wb.save(output)
+        st.success("✅ Archivo cargado correctamente en memoria.")
         
-        # Forzamos que el puntero vuelva al inicio para que Streamlit lea el archivo completo
-        output.seek(0)
-        processed_data = output.read()
-
+        # Preparamos el buffer de salida
+        output_buffer = BytesIO()
+        
+        # Guardamos el archivo directamente al buffer
+        wb.save(output_buffer)
+        
+        # Resetear el puntero al inicio para la descarga
+        output_buffer.seek(0)
+        
         st.download_button(
-            label="📥 Descargar copia de prueba",
-            data=processed_data,
-            file_name="test_espejo.xlsx",
+            label="📥 Descargar y Probar en Excel",
+            data=output_buffer,
+            file_name="plantilla_test_integridad.xlsx",
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
         )
         
-        st.info("💡 Si este archivo abre y tiene los desplegables, ya podemos meter la lógica de los 14 tramos.")
+        st.info("💡 Por favor, abre el archivo descargado. Si Excel dice que está dañado, prueba a darle a 'Sí' en reparar y mira si los desplegables siguen vivos.")
 
     except Exception as e:
-        st.error(f"Error técnico: {e}")
+        st.error(f"Error crítico al procesar: {e}")
