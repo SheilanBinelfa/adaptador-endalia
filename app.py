@@ -224,27 +224,33 @@ def fmt_date(val):
 
 def find_plantilla_columns(ws, header_row=1):
     cols = {}
-    keywords = {
-        'nif': ['doc. identificador', 'nif', 'dni', 'identificador'],
-        'codigo': ['codigo empleado', 'código empleado'],
-        'empleado': ['empleado'],
-        'fecha_ref': ['fecha de referencia'],
-        'zona': ['zona horaria'],
-        'inicio': ['inicio'],
-        'fin': ['fin'],
-        'tipo_tramo': ['tipo de tramo'],
-        'sobrescritura': ['sobrescritura'],
-    }
+    # Recorrer todas las columnas y asignar por header exacto/parcial
     for col in range(1, ws.max_column + 1):
         val = ws.cell(row=header_row, column=col).value
         if val is None:
             continue
-        val_lower = str(val).strip().lower()
-        for key, terms in keywords.items():
-            for term in terms:
-                if term in val_lower and key not in cols:
-                    cols[key] = col
-                    break
+        h = str(val).strip().lower()
+
+        if 'doc. identificador' in h or h == 'nif' or h == 'dni':
+            cols.setdefault('nif', col)
+        elif 'codigo empleado' in h or 'código empleado' in h:
+            cols.setdefault('codigo', col)
+        elif h == 'empleado':
+            # Solo match EXACTO para evitar confundir con "Código empleado"
+            cols.setdefault('empleado', col)
+        elif 'fecha de referencia' in h:
+            cols.setdefault('fecha_ref', col)
+        elif 'zona horaria' in h:
+            cols.setdefault('zona', col)
+        elif h == 'inicio':
+            cols.setdefault('inicio', col)
+        elif h == 'fin':
+            cols.setdefault('fin', col)
+        elif 'tipo de tramo' in h:
+            cols.setdefault('tipo_tramo', col)
+        elif 'sobrescritura' in h:
+            cols.setdefault('sobrescritura', col)
+
     return cols
 
 
