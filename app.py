@@ -5,131 +5,101 @@ import pandas as pd
 from io import BytesIO
 import datetime
 
-# --- CONFIGURACIÓN DE LA PÁGINA ---
-st.set_page_config(page_title="Adaptador Endalia Pro", page_icon="📊", layout="wide")
+# --- CONFIGURACIÓN DE PÁGINA ---
+st.set_page_config(page_title="Adaptador Endalia Real", page_icon="🎯", layout="wide")
 
-# Estilos para que la interfaz sea limpia y profesional
+st.title("🎯 Adaptador Endalia: Inyección Total")
 st.markdown("""
-    <style>
-    .main { background-color: #f8fafc; }
-    .stButton>button { 
-        width: 100%; 
-        border-radius: 8px; 
-        height: 3em; 
-        font-weight: bold; 
-        background-color: #2563eb; 
-        color: white; 
-        border: none;
-    }
-    .stButton>button:hover { 
-        background-color: #1d4ed8; 
-    }
-    </style>
-    """, unsafe_allow_html=True)
+Esta versión está diseñada para **no tocar** los desplegables. 
+1. Abre tu plantilla original.
+2. Localiza a los empleados del registro.
+3. Escribe los datos *dentro* de las celdas existentes.
+""")
 
-st.title("🚀 Adaptador Quirúrgico Endalia")
-st.info("Este motor edita la plantilla original celda por celda para garantizar que los menús desplegables y formatos de Endalia permanezcan intactos.")
+# --- BARRA LATERAL ---
+st.sidebar.header("⚙️ Configuración")
+bulk_time = st.sidebar.time_input("Hora de Cierre masivo", datetime.time(18, 0))
+tz_text = st.sidebar.text_input("Zona Horaria", "(UTC+01:00) Bruselas, Copenhague, Madrid, París")
 
-# --- BARRA LATERAL: CONFIGURACIÓN ---
-st.sidebar.header("⚙️ Parámetros de Inyección")
-bulk_end_time = st.sidebar.time_input("Hora de Cierre para tramos abiertos", datetime.time(18, 0))
-global_timezone = st.sidebar.text_input("Zona Horaria Exacta", "(UTC+01:00) Bruselas, Copenhague, Madrid, París")
-global_overwrite = st.sidebar.selectbox("¿Sobrescribir datos existentes?", ["SÍ", "NO"], index=0)
-
-# --- CARGA DE ARCHIVOS ---
+# --- CARGA ---
 col1, col2 = st.columns(2)
-
 with col1:
-    st.subheader("1. Plantilla de Endalia")
-    file_plantilla = st.file_uploader("Sube el Excel ORIGINAL (con desplegables)", type=["xlsx"], key="p")
-
+    f_plantilla = st.file_uploader("1. Sube la Plantilla con Desplegables", type=["xlsx"])
 with col2:
-    st.subheader("2. Registro de Tramos")
-    file_registros = st.file_uploader("Sube el archivo con los tramos a importar", type=["xlsx", "csv"], key="r")
+    f_datos = st.file_uploader("2. Sube tus 14 tramos (o los que tengas)", type=["xlsx", "csv"])
 
-if file_plantilla and file_registros:
+if f_plantilla and f_datos:
     try:
-        # 1. Leer los registros que queremos importar
-        if file_registros.name.endswith('.csv'):
-            df_registros = pd.read_csv(file_registros)
-        else:
-            df_registros = pd.read_excel(file_registros)
+        # Cargar datos a importar
+        df_in = pd.read_excel(f_datos) if f_datos.name.endswith('xlsx') else pd.read_csv(f_datos)
         
-        def normalize(name):
-            return str(name).strip().upper() if pd.notnull(name) else ""
-
-        st.success(f"Se han cargado {len(df_registros)} registros para procesar.")
-
-        if st.button("💉 INYECTAR DATOS Y MANTENER DESPLEGABLES"):
-            # 2. CARGA QUIRÚRGICA: Abrimos el archivo sin evaluar fórmulas para no perder metadatos
-            wb = load_workbook(file_plantilla, data_only=False)
+        if st.button("🚀 GENERAR EXCEL CON DATOS Y DESPLEGABLES"):
+            # CARGA QUIRÚRGICA: Abrimos el archivo real
+            # keep_vba=True ayuda a que Excel no crea que es un archivo 'limpio'
+            wb = load_workbook(f_plantilla, keep_vba=True, data_only=False)
+            ws = wb["Registros de jornada"]
             
-            if "Registros de jornada" not in wb.sheetnames:
-                st.error("No se encontró la hoja 'Registros de jornada' en la plantilla.")
-            else:
-                ws = wb["Registros de jornada"]
-                
-                # Mapear columnas de la fila 1 para saber dónde escribir
-                headers = [str(cell.value) for cell in ws[1]]
-                try:
-                    m = {
-                        "emp": headers.index("Empleado") + 1,
-                        "fec": headers.index("Fecha de referencia") + 1,
-                        "ini": headers.index("Inicio") + 1,
-                        "fin": headers.index("Fin") + 1,
-                        "tip": headers.index("Tipo de tramo") + 1,
-                        "zon": headers.index("Zona Horaria") + 1,
-                        "sob": headers.index("Sobrescritura") + 1
-                    }
-                except ValueError as e:
-                    st.error(f"La plantilla no tiene el formato estándar de Endalia. Falta: {e}")
-                    st.stop()
+            # Identificar columnas por nombre exacto
+            headers = {cell.value: i+1 for i, cell in enumerate(ws[1]) if cell.value is not None}
+            
+            # Columnas críticas en la plantilla de Endalia
+            cols_map = {
+                "id": headers.get("Nº doc. Identificador") or headers.get("Código empleado"),
+                "fec": headers.get("Fecha de referencia"),
+                "ini": headers.index.get("Inicio") if "Inicio" in headers else headers.get("Inicio"),
+                "fin": headers.get("Fin"),
+                "tipo": headers.get("Tipo de tramo"),
+                "zona": headers.get("Zona Horaria"),
+                "sob": headers.get("Sobrescritura")
+            }
+            
+            # Como los nombres de cabecera pueden variar, buscamos por posición si fallan
+            col_id = 1 # A (Identificador)
+            col_fec = 4 # D (Fecha)
+            col_ini = 6 # F (Inicio)
+            col_fin = 7 # G (Fin)
+            col_tipo = 8 # H (Tipo de tramo -> DESPLEGABLE)
+            col_sob = 9 # I (Sobrescritura -> DESPLEGABLE)
 
-                log_cambios = []
+            count = 0
+            # Iterar sobre tus 14 tramos
+            for _, row_data in df_in.iterrows():
+                search_val = str(row_data['Empleado']).strip().upper()
                 
-                # 3. Procesar cada tramo del archivo de entrada
-                for _, reg in df_registros.iterrows():
-                    nombre_buscado = normalize(reg['Empleado'])
-                    encontrado = False
+                # Buscar en la plantilla (Columna A o B)
+                for r in range(2, ws.max_row + 1):
+                    cell_val = str(ws.cell(row=r, column=1).value).strip().upper()
                     
-                    # Buscamos la fila correspondiente en la plantilla
-                    for r in range(2, ws.max_row + 1):
-                        nombre_en_plantilla = normalize(ws.cell(row=r, column=m["emp"]).value)
+                    if search_val in cell_val:
+                        # INYECCIÓN: Solo cambiamos el .value de la celda
+                        # Esto NO borra la validación de datos (el desplegable)
+                        ws.cell(row=r, column=col_fec).value = str(row_data['Fecha'])
+                        ws.cell(row=r, column=col_ini).value = str(row_data['Hora inicio'])
                         
-                        if nombre_en_plantilla == nombre_buscado:
-                            # Determinamos la hora de fin (si no viene en el archivo, usamos la masiva)
-                            h_fin = str(reg['Hora fin']) if pd.notnull(reg['Hora fin']) and str(reg['Hora fin']) != "00:00" else bulk_end_time.strftime("%H:%M")
-                            
-                            # Escribimos solo el VALOR. Al no tocar la celda completa, el desplegable se mantiene.
-                            ws.cell(row=r, column=m["fec"]).value = str(reg['Fecha'])
-                            ws.cell(row=r, column=m["ini"]).value = str(reg['Hora inicio'])
-                            ws.cell(row=r, column=m["fin"]).value = h_fin
-                            ws.cell(row=r, column=m["tip"]).value = str(reg.get('Tipo de tramo', 'Trabajo'))
-                            ws.cell(row=r, column=m["zon"]).value = global_timezone
-                            ws.cell(row=r, column=m["sob"]).value = global_overwrite
-                            
-                            log_cambios.append({"Empleado": reg['Empleado'], "Fila": r, "Estado": "✅ Inyectado"})
-                            encontrado = True
-                            break
-                    
-                    if not encontrado:
-                        log_cambios.append({"Empleado": reg['Empleado'], "Fila": "-", "Estado": "⚠️ No encontrado"})
+                        h_fin = str(row_data['Hora fin']) if pd.notnull(row_data['Hora fin']) and "00:00" not in str(row_data['Hora fin']) else bulk_time.strftime("%H:%M")
+                        ws.cell(row=r, column=col_fin).value = h_fin
+                        
+                        # Valores que deben coincidir con el desplegable
+                        ws.cell(row=r, column=col_tipo).value = "Trabajo" 
+                        ws.cell(row=r, column=5).value = tz_text # Zona Horaria
+                        ws.cell(row=r, column=col_sob).value = "SÍ"
+                        
+                        count += 1
+                        break
 
-                # 4. Mostrar resumen y generar descarga
-                st.subheader("Resumen de la Inyección")
-                st.dataframe(pd.DataFrame(log_cambios))
-                
-                output = BytesIO()
-                wb.save(output)
-                
-                st.download_button(
-                    label="💾 DESCARGAR EXCEL CON DESPLEGABLES",
-                    data=output.getvalue(),
-                    file_name=f"Endalia_Final_{datetime.date.today()}.xlsx",
-                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-                )
-                
+            # GUARDADO ESPECIAL
+            output = BytesIO()
+            wb.save(output)
+            processed_data = output.getvalue()
+            
+            st.success(f"¡Hecho! Se han inyectado {count} tramos manteniendo los desplegables.")
+            
+            st.download_button(
+                label="📥 DESCARGAR PLANTILLA FINAL",
+                data=processed_data,
+                file_name="Endalia_Importacion_OK.xlsx",
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+            )
+
     except Exception as e:
-        st.error(f"Error durante el proceso: {e}")
-else:
-    st.info("Esperando archivos para procesar...")
+        st.error(f"Error: {e}. Asegúrate de que los nombres de las columnas en tu archivo de datos sean 'Empleado', 'Fecha', 'Hora inicio'.")
